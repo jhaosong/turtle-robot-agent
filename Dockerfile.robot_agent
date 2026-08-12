@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+COPY src/robot_agent/requirements.txt /tmp/robot-agent-requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r /tmp/robot-agent-requirements.txt
+
+CMD ["python", "/app/src/robot_agent/cli.py"]

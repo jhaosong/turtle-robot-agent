@@ -1,0 +1,28 @@
+FROM turtlebot3_behavior:overlay
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    PATH=/opt/robot-agent-venv/bin:${PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-venv \
+        xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/robot_agent/requirements.txt /tmp/robot-agent-requirements.txt
+RUN python3 -m venv --system-site-packages /opt/robot-agent-venv && \
+    /opt/robot-agent-venv/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    /opt/robot-agent-venv/bin/python -m pip install --no-cache-dir -r /tmp/robot-agent-requirements.txt
+
+# Symlink-install points ROS executables back into these source directories;
+# archive transfers from macOS may not preserve their executable bits.
+RUN chmod 0755 \
+        /entrypoint.sh \
+        /overlay_ws/src/tb3_worlds/scripts/*.py \
+        /overlay_ws/src/tb3_autonomy/scripts/*.py
+
+WORKDIR /app
+CMD ["/app/run_robot_agent_ros.sh"]
