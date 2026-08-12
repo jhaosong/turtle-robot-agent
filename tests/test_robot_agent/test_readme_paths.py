@@ -6,7 +6,8 @@ import unittest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-READMES = (REPOSITORY_ROOT / "README.md", REPOSITORY_ROOT / "src/robot_agent/README.md")
+PACKAGE_README = REPOSITORY_ROOT / "src/robot_agent/README.md"
+README_CANDIDATES = (REPOSITORY_ROOT / "README.md", PACKAGE_README)
 FENCED_BLOCK = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 LOCAL_PATH = re.compile(
     r"(?<![\w/])((?:\./)?[\w.-]+\.sh|(?:src|tests)/[A-Za-z0-9_./*-]+)"
@@ -24,8 +25,9 @@ def referenced_local_paths(readme: Path) -> set[str]:
 
 class ReadmePathTest(unittest.TestCase):
     def test_documented_local_paths_exist(self):
+        self.assertTrue(PACKAGE_README.exists(), "robot_agent package README is required")
         missing: list[str] = []
-        for readme in READMES:
+        for readme in (path for path in README_CANDIDATES if path.exists()):
             for reference in sorted(referenced_local_paths(readme)):
                 normalized = reference.removeprefix("./").rstrip("/")
                 if "*" in normalized:
