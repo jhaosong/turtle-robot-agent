@@ -9,6 +9,26 @@ export ROBOT_AGENT_LOCATION_FILE="${ROBOT_AGENT_LOCATION_FILE:-/app/turtlebot3_b
 if [[ "${ROBOT_AGENT_GUI:-false}" == "true" ]]; then
     : "${DISPLAY:?ROBOT_AGENT_GUI=true requires DISPLAY}"
     echo "GUI mode enabled on DISPLAY=${DISPLAY}"
+    rviz_config="$(ros2 pkg prefix turtlebot3_navigation2)/share/turtlebot3_navigation2/rviz/tb3_navigation2.rviz"
+    if [[ ! -f "${rviz_config}" ]]; then
+        echo "Error: TurtleBot3 RViz configuration not found: ${rviz_config}" >&2
+        exit 1
+    fi
+    # TurtleBot3's Humble config ships a disabled Realsense group pointed at
+    # an obsolete topic. Adapt that display to this demo's Gazebo camera.
+    sed -i -z \
+        -e 's|Value: /intel_realsense_r200_depth/image_raw|Value: /camera/image_raw|' \
+        -e 's|      Enabled: false\n      Name: Realsense|      Enabled: true\n      Name: Realsense|' \
+        -e 's|Name: RealsenseCamera|Name: Image|' \
+        -e 's|Name: Realsense\n|Name: Camera\n|' \
+        -e 's|\n  X: [0-9-]*\n  Y: [0-9-]*\n*$|\n  X: 0\n  Y: 0\n|' \
+        "${rviz_config}"
+    if ! grep -Fq 'Value: /camera/image_raw' "${rviz_config}" || \
+       ! grep -B1 -F 'Name: Camera' "${rviz_config}" | grep -Fq 'Enabled: true'; then
+        echo "Error: Failed to configure the RViz camera display." >&2
+        exit 1
+    fi
+    echo "RViz camera display enabled on /camera/image_raw"
     xvfb_pid=""
 else
     export DISPLAY="${DISPLAY:-:99}"
@@ -18,7 +38,17 @@ fi
 ros2 launch tb3_worlds tb3_demo_world.launch.py >/tmp/turtlebot-demo-world.log 2>&1 &
 simulation_pid=$!
 
+# Keep one TF listener alive during startup. Recreating tf2_echo for every
+# readiness poll discards its DDS discovery and TF buffer, which can report a
+# false negative forever on a busy simulator even while map -> base_link exists.
+: >/tmp/robot-agent-map-tf.log
+stdbuf -oL -eL ros2 run tf2_ros tf2_echo map base_link \
+    >/tmp/robot-agent-map-tf.log 2>&1 &
+tf_probe_pid=$!
+
 cleanup() {
+    kill "${tf_probe_pid}" 2>/dev/null || true
+    wait "${tf_probe_pid}" 2>/dev/null || true
     kill "${simulation_pid}" 2>/dev/null || true
     wait "${simulation_pid}" 2>/dev/null || true
     if [[ -n "${xvfb_pid}" ]]; then
@@ -43,9 +73,7 @@ lifecycle_node_is_active() {
 }
 
 map_transform_is_ready() {
-    local tf_output
-    tf_output="$(timeout 2 ros2 run tf2_ros tf2_echo map base_link 2>&1 || true)"
-    grep -q -- 'Translation:' <<<"${tf_output}"
+    grep -q -- 'Translation:' /tmp/robot-agent-map-tf.log
 }
 
 echo "Waiting for Gazebo and active Nav2/AMCL lifecycle nodes..."
@@ -120,6 +148,8 @@ if [[ "${ready}" != "true" ]]; then
         echo "--- ${node} ---" >&2
         ros2 lifecycle get "${node}" >&2 || true
     done
+    echo "--- map -> base_link TF probe ---" >&2
+    tail -n 50 /tmp/robot-agent-map-tf.log >&2
     tail -n 100 /tmp/turtlebot-demo-world.log >&2
     exit 1
 fi

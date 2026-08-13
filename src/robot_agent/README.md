@@ -76,33 +76,101 @@ ROBOT_AGENT_ROS_BACKEND=rclpy \
 ./demo_robot_agent.sh --execute-ros2 --ros-backend rclpy
 ```
 
-For a self-contained real-execution test against TurtleBot3 Gazebo + Nav2 +
-AMCL, build and launch the integrated ROS2 image:
+### Integrated TurtleBot3 simulation
+
+This is the primary end-to-end run path. It starts TurtleBot3 Gazebo, Nav2,
+AMCL, RViz, the camera pipeline, and the interactive agent in one container.
+
+Prerequisites:
+
+- Docker Desktop is running.
+- On Windows, run these commands inside the `Ubuntu-22.04` WSL terminal.
+- WSLg is available (`echo "$DISPLAY"` and `ls /mnt/wslg` should succeed).
+- The repository root `.env` contains the configured LLM credentials.
+
+First build and launch:
 
 ```bash
+cd ~/rosa-main
 chmod +x demo_robot_agent_ros_docker.sh run_robot_agent_ros.sh
 ./demo_robot_agent_ros_docker.sh
 ```
 
-By default this starts Gazebo and RViz under Xvfb (no visible GUI). It waits for
-the required Nav2 and AMCL lifecycle nodes, `/odom`, `/scan`, the
-`/navigate_to_pose` action, and the `map -> base_link` transform before starting
-the agent with `execute_ros2=true` and the `rclpy` backend. A successful Nav2
-result updates confirmed pose and visited locations. Reuse the completed image
-with:
+GUI mode is the default: Gazebo and RViz open through WSLg on the Windows
+desktop. Startup waits for active Nav2 and AMCL lifecycle nodes, `/odom`,
+`/scan`, `/navigate_to_pose`, and the `map -> base_link` transform. The agent
+prompt appears after this message:
+
+```text
+ROS2 simulation is ready. Agent commands will now execute through rclpy/Nav2.
+ROS2 TurtleBot agent. Type `exit` to quit.
+```
+
+The first build can take several minutes. Reuse the completed images on later
+runs without rebuilding:
 
 ```bash
 SKIP_BUILD=true ./demo_robot_agent_ros_docker.sh
 ```
 
-On WSLg, expose the Gazebo and RViz windows on the Windows desktop with:
+Use headless mode only when a display is intentionally unavailable:
 
 ```bash
-ROBOT_AGENT_GUI=true SKIP_BUILD=true ./demo_robot_agent_ros_docker.sh
+ROBOT_AGENT_GUI=false SKIP_BUILD=true ./demo_robot_agent_ros_docker.sh
 ```
 
-Camera perception additionally requires OpenCV, `cv_bridge`, and a publisher on
-`/camera/image_raw`. Active perception backoff/retry is disabled by default.
+Suggested agent checks:
+
+```text
+Navigate to location1.
+Navigate to location2, then go to location3.
+Navigate to x=1.0, y=2.0, yaw=0.0.
+Report the robot state.
+Inspect for blue objects, then find a blue object.
+Search for a blue object while moving through location1, location2, and location3.
+Stop the robot.
+```
+
+Named targets are defined in
+`turtlebot3_behavior_demos/tb3_worlds/maps/sim_house_locations.yaml`. Coordinate
+navigation uses the `map` frame and is bounded by the configured workspace
+limits.
+
+While the container is running, inspect ROS2 from another WSL terminal:
+
+```bash
+docker exec -it rosa-robot-agent-ros bash -lc '
+source /opt/ros/humble/setup.bash
+source /turtlebot3_ws/install/setup.bash
+source /overlay_ws/install/setup.bash
+ros2 lifecycle get /amcl
+ros2 lifecycle get /bt_navigator
+ros2 action list
+ros2 topic list
+timeout 5 ros2 run tf2_ros tf2_echo map base_link
+'
+```
+
+View simulator startup logs:
+
+```bash
+docker exec -it rosa-robot-agent-ros tail -f /tmp/turtlebot-demo-world.log
+```
+
+Type `exit` at the agent prompt to stop the agent and remove its temporary
+container. If the prompt is unavailable, run this from WSL:
+
+```bash
+docker rm -f rosa-robot-agent-ros
+```
+
+Camera perception uses `/camera/image_raw`. Active perception backoff/retry is
+disabled by default. `search_for_object` is a separate continuous-search tool:
+each route leg remains one uninterrupted Nav2 action while the configured
+detector checks the latest frame at a fixed time interval. A match cancels the
+active Nav2 goal and prevents later route locations from running. This requires
+the `rclpy` backend; CLI/dry-run mode only plans the first navigation leg and
+does not invoke camera detection.
 
 ## Runtime configuration
 
@@ -118,6 +186,7 @@ Camera perception additionally requires OpenCV, `cv_bridge`, and a publisher on
 | `ROBOT_AGENT_ODOM_TOPIC` | `/odom` | Odometry source |
 | `ROBOT_AGENT_CAMERA_TOPIC` | `/camera/image_raw` | Camera source |
 | `ROBOT_AGENT_MAP_FRAME` | `map` | Navigation frame |
+| `ROBOT_AGENT_BASE_FRAME` | `base_link` | Robot frame used for confirmed map pose from TF |
 | `ROBOT_AGENT_TOOL_TIMEOUT_SEC` | `30` | ROS operation timeout |
 | `ROBOT_AGENT_LOOP_WARN_THRESHOLD` | `3` | Identical-call warning threshold |
 | `ROBOT_AGENT_REPEATED_TOOL_LIMIT` | `5` | Identical-call hard stop |
@@ -128,9 +197,19 @@ Camera perception additionally requires OpenCV, `cv_bridge`, and a publisher on
 | `ROBOT_AGENT_ACTIVE_PERCEPTION_RETRY` | `false` | Enable one backoff + camera retry |
 | `ROBOT_AGENT_ACTIVE_PERCEPTION_BACKOFF_SPEED` | `-0.05` | Recovery linear velocity in m/s |
 | `ROBOT_AGENT_ACTIVE_PERCEPTION_BACKOFF_DURATION_SEC` | `0.5` | Recovery duration |
+| `ROBOT_AGENT_DETECTOR_BACKEND` | `color_blob` | Moving-search detector: `color_blob`, `yolo`, or fail-fast `vlm` placeholder |
+| `ROBOT_AGENT_DETECTION_INTERVAL_SEC` | `1.0` | Seconds between detector calls while Nav2 is moving |
+| `ROBOT_AGENT_DETECTION_CONFIDENCE_THRESHOLD` | `0.8` | Minimum confidence required to cancel navigation and report a match |
+| `ROBOT_AGENT_CENTER_ON_DETECTION` | `true` | Rotate in place after detection until the target is horizontally centered |
+| `ROBOT_AGENT_IMAGE_CENTER_TOLERANCE` | `0.08` | Allowed normalized horizontal error around image center |
+| `ROBOT_AGENT_CENTERING_MAX_ANGULAR_SPEED` | `0.2` | Maximum visual-centering rotation speed in rad/s |
+| `ROBOT_AGENT_CENTERING_GAIN` | `0.5` | Proportional gain from image error to angular velocity |
+| `ROBOT_AGENT_CENTERING_TIMEOUT_SEC` | `10.0` | Maximum time allowed for post-detection centering |
+| `ROBOT_AGENT_YOLO_MODEL` | `yolov8n.pt` | Ultralytics model used when detector backend is `yolo` |
+| `ROBOT_AGENT_YOLO_INPUT_SIZE` | `640` | Bounded YOLO inference image size |
 | `ROBOT_AGENT_WORKSPACE_MIN_X/MAX_X` | `-10/10` | Safe map X bounds |
 | `ROBOT_AGENT_WORKSPACE_MIN_Y/MAX_Y` | `-10/10` | Safe map Y bounds |
-| `ROBOT_AGENT_GUI` | `false` | Use WSLg instead of Xvfb in the integrated ROS Docker launcher |
+| `ROBOT_AGENT_GUI` | `true` | Show Gazebo and RViz through WSLg; set `false` to use Xvfb headless mode |
 
 ## Tests
 
@@ -143,3 +222,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests/test_robot_agent -v
 
 Real Nav2, camera, and Gazebo integration still require a sourced ROS2 runtime;
 unit tests use fake adapters and never send robot commands.
+
+The `1.0` second moving-search cadence is intentionally conservative because
+YOLO, Nav2, AMCL, and Gazebo share compute during a full simulation. Tune it
+only after observing inference latency and GPU utilization on the target host.

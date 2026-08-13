@@ -77,26 +77,48 @@ class Pose2D:
 
 
 @dataclass
+class ImagePosition:
+    """Detection center in one camera image, not a world-frame coordinate."""
+
+    x_px: float
+    y_px: float
+    x_normalized: float
+    y_normalized: float
+
+    def to_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+@dataclass
 class Detection:
     label: str
     confidence: float
     color: str | None = None
     position: Pose2D | None = None
+    image_position: ImagePosition | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         if self.position is not None:
             result["position"] = self.position.to_dict()
+        if self.image_position is not None:
+            result["image_position"] = self.image_position.to_dict()
         return result
 
     @classmethod
     def from_snapshot(cls, payload: dict[str, Any]) -> "Detection":
         position = payload.get("position")
+        image_position = payload.get("image_position")
         return cls(
             label=str(payload["label"]),
             confidence=float(payload["confidence"]),
             color=payload.get("color"),
             position=Pose2D(**position) if isinstance(position, dict) else None,
+            image_position=(
+                ImagePosition(**image_position)
+                if isinstance(image_position, dict)
+                else None
+            ),
         )
 
 

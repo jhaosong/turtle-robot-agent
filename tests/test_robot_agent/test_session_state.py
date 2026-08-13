@@ -17,13 +17,14 @@ from robot_agent.state import Pose2D, ToolResult, ToolStatus
 
 class FakeRosAdapter(Ros2Adapter):
     def navigate_to_pose(self, pose: Pose2D) -> ToolResult:
+        self._pose = pose
         return ToolResult(status=ToolStatus.SUCCESS, data={"target_pose": pose.to_dict()})
 
     def stop_robot(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
     def get_pose(self) -> ToolResult:
-        return ToolResult(status=ToolStatus.FAILED, error="unused")
+        return ToolResult(status=ToolStatus.SUCCESS, data={"pose": self._pose.to_dict()})
 
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)

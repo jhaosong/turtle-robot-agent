@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from robot_agent.agents.lead_agent.planner import LeadTaskPlanner, TaskPlan
+from robot_agent.agents.lead_agent.planner import PLANNER_PROMPT, LeadTaskPlanner, TaskPlan
 
 
 class CapturingStructuredModel:
@@ -18,6 +18,11 @@ class CapturingStructuredModel:
 
 
 class PlannerContextTest(unittest.TestCase):
+    def test_planner_keeps_moving_search_as_one_perception_step(self):
+        self.assertIn("one perception step", PLANNER_PROMPT)
+        self.assertIn("continuous Nav2 route", PLANNER_PROMPT)
+        self.assertIn('"find/search in the\nroom" as moving search', PLANNER_PROMPT)
+
     def test_known_location_catalog_is_supplied_to_planner(self):
         model = CapturingStructuredModel()
 

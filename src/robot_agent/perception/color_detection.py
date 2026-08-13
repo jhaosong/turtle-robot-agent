@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from robot_agent.state import Detection
+from robot_agent.state import Detection, ImagePosition
 
 
 HSV_THRESHOLDS: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
@@ -35,7 +35,18 @@ def detect_colored_blobs(image: Any, color: str) -> list[Detection]:
     parameters.filterByConvexity = False
     parameters.thresholdStep = 50
     keypoints = cv2.SimpleBlobDetector_create(parameters).detect(mask)
+    height, width = image.shape[:2]
     return [
-        Detection(label="colored_object", color=color, confidence=min(1.0, point.size / 100.0))
+        Detection(
+            label="colored_object",
+            color=color,
+            confidence=min(1.0, point.size / 100.0),
+            image_position=ImagePosition(
+                x_px=float(point.pt[0]),
+                y_px=float(point.pt[1]),
+                x_normalized=float(point.pt[0]) / float(width),
+                y_normalized=float(point.pt[1]) / float(height),
+            ),
+        )
         for point in keypoints
     ]

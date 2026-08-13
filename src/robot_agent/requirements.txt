@@ -8,6 +8,7 @@ python-dotenv>=1
 
 # Optional camera perception dependency:
 # opencv-python>=4.8
+# ultralytics>=8.0  # only for ROBOT_AGENT_DETECTOR_BACKEND=yolo
 #
 # rclpy, nav2_msgs, nav_msgs, geometry_msgs, sensor_msgs, and cv_bridge are
 # supplied by a sourced ROS2 installation and are not reliable PyPI packages.

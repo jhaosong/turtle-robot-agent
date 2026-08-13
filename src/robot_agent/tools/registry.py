@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import time
 from typing import Any
@@ -11,6 +12,7 @@ from langchain_core.tools import StructuredTool
 
 from robot_agent.guardrails import SafetyValidator
 from robot_agent.middlewares import ToolLoopDetector
+from robot_agent.perception import Detector, build_detector
 from robot_agent.ros import Ros2Adapter
 from robot_agent.runtime.runtime import RobotAgentRuntime
 from robot_agent.skills.behavior_tree import BehaviorTreeSkill
@@ -22,6 +24,8 @@ from robot_agent.tools.contracts import (
     BehaviorTreeSkillInput,
     NavigateToLocationInput,
     NavigateToPoseInput,
+    MoveRelativeInput,
+    SearchForObjectInput,
     WaitInput,
 )
 from robot_agent.world_model import WorldModel
@@ -45,6 +49,7 @@ class RobotToolRegistry:
         runtime: RobotAgentRuntime,
         ros: Ros2Adapter,
         bt_skill: BehaviorTreeSkill,
+        detector: Detector | None = None,
     ) -> None:
         self.runtime = runtime
         self.ros = ros
@@ -52,6 +57,11 @@ class RobotToolRegistry:
         self.locations = load_locations(runtime.settings.location_file)
         self.world = WorldModel(runtime.state.robot_state)
         self.safety = SafetyValidator(runtime.settings)
+        self.detector = detector or build_detector(
+            runtime.settings.detector_backend,
+            yolo_model=runtime.settings.yolo_model,
+            yolo_input_size=runtime.settings.yolo_input_size,
+        )
         self.loop_detector = ToolLoopDetector(
             warn_threshold=runtime.settings.loop_warn_threshold,
             hard_limit=runtime.settings.repeated_tool_limit,
@@ -123,10 +133,52 @@ class RobotToolRegistry:
         self.safety.validate_pose(pose)
         result = self.ros.navigate_to_pose(pose)
         if result.status == ToolStatus.SUCCESS:
-            self.world.update_navigation_status("succeeded", planned_pose=None)
-            self.world.update_pose(pose)
-            if location is not None and location not in self.runtime.state.visited_locations:
-                self.runtime.state.visited_locations.append(location)
+            observed = self.ros.get_pose()
+            if observed.status == ToolStatus.SUCCESS and observed.data.get("pose"):
+                actual_pose = Pose2D(**observed.data["pose"])
+                if actual_pose.frame_id != pose.frame_id:
+                    self.world.update_navigation_status("needs_verification", planned_pose=None)
+                    result.status = ToolStatus.FAILED
+                    result.error = (
+                        "Nav2 reported success, but the observed pose is in "
+                        f"{actual_pose.frame_id!r} instead of {pose.frame_id!r}"
+                    )
+                    result.retryable = True
+                    result.data = {
+                        **result.data,
+                        "navigation_goal_succeeded": True,
+                        "pose_observation": observed.to_dict(),
+                    }
+                    return result
+                position_error = math.hypot(
+                    actual_pose.x - pose.x,
+                    actual_pose.y - pose.y,
+                )
+                yaw_error = math.atan2(
+                    math.sin(actual_pose.yaw - pose.yaw),
+                    math.cos(actual_pose.yaw - pose.yaw),
+                )
+                self.world.update_navigation_status("succeeded", planned_pose=None)
+                self.world.update_pose(actual_pose)
+                result.data = {
+                    **result.data,
+                    "actual_pose": actual_pose.to_dict(),
+                    "position_error_m": position_error,
+                    "yaw_error_rad": yaw_error,
+                    "pose_observation": observed.data,
+                }
+                if location is not None and location not in self.runtime.state.visited_locations:
+                    self.runtime.state.visited_locations.append(location)
+            else:
+                self.world.update_navigation_status("needs_verification", planned_pose=None)
+                result.status = ToolStatus.FAILED
+                result.error = "Nav2 reported success, but the final map-frame pose could not be observed"
+                result.retryable = True
+                result.data = {
+                    **result.data,
+                    "navigation_goal_succeeded": True,
+                    "pose_observation": observed.to_dict(),
+                }
         elif result.status == ToolStatus.PLANNED:
             self.world.update_navigation_status("planned", planned_pose=pose)
         else:
@@ -135,6 +187,220 @@ class RobotToolRegistry:
 
     def _navigate_to_location(self, location: str) -> ToolResult:
         return self._navigate_to_pose(self.locations[location], location=location)
+
+    def _move_relative(self, distance_m: float) -> ToolResult:
+        observed = self.ros.get_pose()
+        if observed.status != ToolStatus.SUCCESS or not observed.data.get("pose"):
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={"operation": "move_relative", "distance_m": distance_m},
+                error="Cannot compute relative motion without a live map-frame pose",
+                retryable=True,
+            )
+        start_pose = Pose2D(**observed.data["pose"])
+        if start_pose.frame_id != self.runtime.settings.map_frame:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={
+                    "operation": "move_relative",
+                    "distance_m": distance_m,
+                    "start_pose": start_pose.to_dict(),
+                },
+                error="Relative motion requires a live pose in the configured map frame",
+                retryable=True,
+            )
+        target = Pose2D(
+            x=start_pose.x + distance_m * math.cos(start_pose.yaw),
+            y=start_pose.y + distance_m * math.sin(start_pose.yaw),
+            yaw=start_pose.yaw,
+            frame_id=start_pose.frame_id,
+        )
+        result = self._navigate_to_pose(target)
+        result.data = {
+            **result.data,
+            "operation": "move_relative",
+            "distance_m": distance_m,
+            "start_pose": start_pose.to_dict(),
+            "computed_target_pose": target.to_dict(),
+        }
+        return result
+
+    def _search_for_object(
+        self,
+        route: list[str],
+        color: str | None,
+        label: str | None,
+    ) -> ToolResult:
+        unknown = [location for location in route if location not in self.locations]
+        if unknown:
+            raise ValueError(f"Unknown search locations: {unknown}")
+        self.detector.validate_query(color=color, label=label)
+
+        observed_frames = 0
+        legs: list[dict[str, Any]] = []
+
+        def detect_latest() -> Detection | None:
+            nonlocal observed_frames
+            image = self.ros.get_camera_frame()
+            if image is None:
+                return None
+            observed_frames += 1
+            matches = self.detector.detect(image, color=color, label=label)
+            matches = [
+                item
+                for item in matches
+                if item.confidence
+                >= self.runtime.settings.detection_confidence_threshold
+            ]
+            if not matches:
+                return None
+            return max(matches, key=lambda item: item.confidence)
+
+        for location in route:
+            pose = self.locations[location]
+            self.safety.validate_pose(pose)
+            navigation = self.ros.navigate_to_pose_with_watch(
+                pose,
+                detect_latest,
+                self.runtime.settings.detection_interval_sec,
+            )
+            legs.append(
+                {
+                    "location": location,
+                    "status": navigation.status.value,
+                    "target_pose": pose.to_dict(),
+                }
+            )
+            found_payload = navigation.data.get("found")
+            if isinstance(found_payload, dict):
+                found = Detection.from_snapshot(found_payload)
+                cancellation_confirmed = navigation.status == ToolStatus.SUCCESS
+                centering = None
+                centered: bool | None = None
+                final_status = navigation.status
+                final_error = navigation.error
+                final_retryable = navigation.retryable
+                if (
+                    cancellation_confirmed
+                    and self.runtime.settings.center_on_detection
+                ):
+                    centering = self.ros.center_target_in_view(
+                        detect_latest,
+                        tick_interval_sec=self.runtime.settings.detection_interval_sec,
+                        horizontal_tolerance=self.runtime.settings.image_center_tolerance,
+                        max_angular_speed=self.runtime.settings.centering_max_angular_speed,
+                        gain=self.runtime.settings.centering_gain,
+                        timeout_sec=self.runtime.settings.centering_timeout_sec,
+                    )
+                    centered = centering.status == ToolStatus.SUCCESS
+                    centered_payload = centering.data.get("found")
+                    if isinstance(centered_payload, dict):
+                        found = Detection.from_snapshot(centered_payload)
+                    if not centered:
+                        final_status = centering.status
+                        final_error = centering.error
+                        final_retryable = centering.retryable
+
+                self.world.update_detections([found])
+                self.world.update_navigation_status(
+                    (
+                        "centered_on_detection"
+                        if centered
+                        else "interrupted_for_detection"
+                        if cancellation_confirmed and centered is None
+                        else "needs_verification"
+                    ),
+                    planned_pose=None,
+                )
+                observed = self.ros.get_pose()
+                observation_pose = None
+                if observed.status == ToolStatus.SUCCESS and observed.data.get("pose"):
+                    observation_pose = Pose2D(**observed.data["pose"])
+                    self.world.update_pose(observation_pose)
+                return ToolResult(
+                    status=final_status,
+                    data={
+                        "operation": "search_for_object",
+                        "found": found.to_dict(),
+                        "object_position": (
+                            found.position.to_dict() if found.position else None
+                        ),
+                        "image_position": (
+                            found.image_position.to_dict()
+                            if found.image_position
+                            else None
+                        ),
+                        "observation_pose": (
+                            observation_pose.to_dict() if observation_pose else None
+                        ),
+                        "route": route,
+                        "completed_legs": legs,
+                        "observed_frames": observed_frames,
+                        "detection_interval_sec": self.runtime.settings.detection_interval_sec,
+                        "confidence_threshold": self.runtime.settings.detection_confidence_threshold,
+                        "navigation_canceled": cancellation_confirmed,
+                        "centering_requested": self.runtime.settings.center_on_detection,
+                        "centered": centered,
+                        "centering": centering.to_dict() if centering else None,
+                    },
+                    error=final_error,
+                    retryable=final_retryable,
+                )
+            if navigation.status == ToolStatus.PLANNED:
+                self.world.update_navigation_status("planned", planned_pose=pose)
+                return ToolResult(
+                    status=ToolStatus.PLANNED,
+                    data={
+                        "operation": "search_for_object",
+                        "route": route,
+                        "completed_legs": legs,
+                        "watch_executed": False,
+                    },
+                )
+            if navigation.status != ToolStatus.SUCCESS:
+                self.world.update_navigation_status("failed", planned_pose=None)
+                return ToolResult(
+                    status=navigation.status,
+                    data={
+                        "operation": "search_for_object",
+                        "route": route,
+                        "completed_legs": legs,
+                        "navigation": navigation.to_dict(),
+                    },
+                    error=navigation.error,
+                    retryable=navigation.retryable,
+                )
+            if location not in self.runtime.state.visited_locations:
+                self.runtime.state.visited_locations.append(location)
+
+        if observed_frames == 0:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={
+                    "operation": "search_for_object",
+                    "route": route,
+                    "completed_legs": legs,
+                    "observed_frames": 0,
+                },
+                error="Search route completed without receiving a camera image",
+                retryable=True,
+            )
+        self.world.update_detections([])
+        self.world.update_navigation_status("succeeded", planned_pose=None)
+        observed = self.ros.get_pose()
+        if observed.status == ToolStatus.SUCCESS and observed.data.get("pose"):
+            self.world.update_pose(Pose2D(**observed.data["pose"]))
+        return ToolResult(
+            status=ToolStatus.SUCCESS,
+            data={
+                "operation": "search_for_object",
+                "found": None,
+                "route": route,
+                "completed_legs": legs,
+                "observed_frames": observed_frames,
+                "detection_interval_sec": self.runtime.settings.detection_interval_sec,
+            },
+        )
 
     def _wait_for(self, seconds: float) -> ToolResult:
         duration = self.safety.validate_wait(seconds)
@@ -187,6 +453,13 @@ class RobotToolRegistry:
                 lambda: self._navigate_to_pose(pose),
             )
 
+        def move_relative(distance_m: float) -> dict[str, Any]:
+            return self._record(
+                "move_relative",
+                {"distance_m": distance_m},
+                lambda: self._move_relative(distance_m),
+            )
+
         def find_object(color: str | None = None, label: str | None = None) -> dict[str, Any]:
             def operation() -> ToolResult:
                 if not self.world.has_perception_observation():
@@ -235,7 +508,10 @@ class RobotToolRegistry:
                     observed = self.ros.detect_color(color)
                     attempts += 1
                 if observed.status == ToolStatus.SUCCESS:
-                    detections = [Detection(**item) for item in observed.data.get("detections", [])]
+                    detections = [
+                        Detection.from_snapshot(item)
+                        for item in observed.data.get("detections", [])
+                    ]
                     self.world.update_detections(detections)
                 return ToolResult(
                     status=observed.status,
@@ -251,6 +527,18 @@ class RobotToolRegistry:
                 )
 
             return self._record("inspect_for_color", {"color": color}, operation)
+
+        def search_for_object(
+            route: list[str],
+            color: str | None = None,
+            label: str | None = None,
+        ) -> dict[str, Any]:
+            arguments = {"route": route, "color": color, "label": label}
+            return self._record(
+                "search_for_object",
+                arguments,
+                lambda: self._search_for_object(route, color, label),
+            )
 
         def run_behavior_tree(goal: str) -> dict[str, Any]:
             def node_started(index: int, node) -> None:
@@ -333,11 +621,28 @@ class RobotToolRegistry:
                 args_schema=NavigateToPoseInput,
                 description="Navigate with Nav2 to explicit x, y map coordinates and an optional yaw heading in radians.",
             ),
+            StructuredTool.from_function(
+                move_relative,
+                args_schema=MoveRelativeInput,
+                description=(
+                    "Move a signed distance in meters along the robot's live current heading. "
+                    "The tool reads TF and computes the map target deterministically."
+                ),
+            ),
             StructuredTool.from_function(find_object, args_schema=FindObjectInput, description="Query the semantic world model for a visible object."),
             StructuredTool.from_function(
                 inspect_for_color,
                 args_schema=InspectForColorInput,
                 description="Inspect the camera once for a supported color and update the semantic world model.",
+            ),
+            StructuredTool.from_function(
+                search_for_object,
+                args_schema=SearchForObjectInput,
+                description=(
+                    "Search for an object while Nav2 continuously traverses an ordered route of known locations; "
+                    "navigation is canceled only when detection reaches the configured confidence threshold. "
+                    "For a color search omit label or use label='colored_object'; color blobs cannot verify classes."
+                ),
             ),
             StructuredTool.from_function(run_behavior_tree, args_schema=BehaviorTreeSkillInput, description="Generate, validate, persist, and execute a behavior tree skill for a multi-step TurtleBot goal."),
             StructuredTool.from_function(

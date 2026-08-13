@@ -13,13 +13,19 @@ from robot_agent.tools.registry import RobotToolRegistry
 
 class SuccessfulPoseAdapter(Ros2Adapter):
     def navigate_to_pose(self, pose: Pose2D) -> ToolResult:
+        self.actual_pose = Pose2D(
+            x=pose.x + 0.03,
+            y=pose.y - 0.42,
+            yaw=pose.yaw - 0.05,
+            frame_id=pose.frame_id,
+        )
         return ToolResult(status=ToolStatus.SUCCESS, data={"target_pose": pose.to_dict()})
 
     def stop_robot(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
     def get_pose(self) -> ToolResult:
-        return ToolResult(status=ToolStatus.FAILED, error="unused")
+        return ToolResult(status=ToolStatus.SUCCESS, data={"pose": self.actual_pose.to_dict()})
 
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
@@ -56,9 +62,26 @@ class NavigateToPoseTest(unittest.TestCase):
             self.assertEqual(result["status"], ToolStatus.SUCCESS.value)
             self.assertEqual(
                 runtime.state.robot_state.pose.to_dict(),
-                {"x": 5.0, "y": 3.0, "yaw": 1.57, "frame_id": "map"},
+                {"x": 5.03, "y": 2.58, "yaw": 1.52, "frame_id": "map"},
             )
+            self.assertAlmostEqual(result["data"]["position_error_m"], 0.421070, places=5)
+            self.assertEqual(result["data"]["actual_pose"], runtime.state.robot_state.pose.to_dict())
             self.assertEqual(runtime.state.visited_locations, [])
+
+    def test_success_without_observed_pose_is_not_confirmed(self):
+        class UnobservablePoseAdapter(SuccessfulPoseAdapter):
+            def get_pose(self) -> ToolResult:
+                return ToolResult(status=ToolStatus.FAILED, error="TF unavailable")
+
+        with TemporaryDirectory() as temporary_directory:
+            runtime = self._runtime(Path(temporary_directory), execute_ros2=True)
+            result = self._tool(runtime, UnobservablePoseAdapter()).invoke(
+                {"x": 5.0, "y": 3.0}
+            )
+
+            self.assertEqual(result["status"], ToolStatus.FAILED.value)
+            self.assertEqual(runtime.state.robot_state.navigation_status, "needs_verification")
+            self.assertIsNone(runtime.state.robot_state.pose)
 
     def test_dry_run_records_planned_pose_only(self):
         with TemporaryDirectory() as temporary_directory:

@@ -22,7 +22,9 @@ class RobotAgentRuntime:
     _TOOL_CAPABILITIES = {
         "navigate_to": "navigation",
         "navigate_to_pose": "navigation",
+        "move_relative": "navigation",
         "inspect_for_color": "perception",
+        "search_for_object": "perception",
         "find_object": "perception",
         "run_behavior_tree": "behavior_tree",
         "stop_robot": "control",
@@ -110,7 +112,20 @@ class RobotAgentRuntime:
             return
         step["last_tool"] = tool_name
         step["last_result_status"] = result.status.value
-        if result.status == ToolStatus.SUCCESS:
+        completed = result.status == ToolStatus.SUCCESS
+        if (
+            completed
+            and capability == "perception"
+            and self.state.goal_requirements.get("requires_perception", False)
+        ):
+            requested_colors = set(
+                self.state.goal_requirements.get("requested_colors") or []
+            )
+            completed = any(
+                not requested_colors or detection.color in requested_colors
+                for detection in self.state.robot_state.visible_objects
+            )
+        if completed:
             step["status"] = "completed"
             step["completed_at"] = result.timestamp
         else:

@@ -6,6 +6,7 @@ TB3_DIR="${ROOT_DIR}/turtlebot3_behavior_demos"
 IMAGE_NAME="${ROBOT_AGENT_ROS_IMAGE:-rosa-robot-agent-ros}"
 PLATFORM="${ROBOT_AGENT_DOCKER_PLATFORM:-linux/amd64}"
 DOCKER_CONFIG_DIR="${ROBOT_AGENT_DOCKER_CONFIG:-${HOME}/.docker-robot-agent}"
+GUI_ENABLED="${ROBOT_AGENT_GUI:-true}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "Error: Docker is not installed or is not on PATH." >&2
@@ -53,7 +54,7 @@ docker_args=(
     --env ROBOT_AGENT_TOOL_TIMEOUT_SEC="${ROBOT_AGENT_TOOL_TIMEOUT_SEC:-120}"
 )
 
-if [[ "${ROBOT_AGENT_GUI:-false}" == "true" ]]; then
+if [[ "${GUI_ENABLED}" == "true" ]]; then
     if [[ ! -d /mnt/wslg ]]; then
         echo "Error: ROBOT_AGENT_GUI=true requires WSLg at /mnt/wslg." >&2
         exit 1
@@ -72,11 +73,31 @@ if [[ "${ROBOT_AGENT_GUI:-false}" == "true" ]]; then
     if [[ -n "${LIBGL_ALWAYS_SOFTWARE:-}" ]]; then
         docker_args+=(--env LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE}")
     fi
+else
+    docker_args+=(--env ROBOT_AGENT_GUI=false)
 fi
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
     docker_args+=(--env-file "${ROOT_DIR}/.env")
 fi
+
+# Forward explicitly supplied perception tuning without overriding .env when
+# the caller did not set a value in this shell.
+for variable_name in \
+    ROBOT_AGENT_DETECTOR_BACKEND \
+    ROBOT_AGENT_DETECTION_INTERVAL_SEC \
+    ROBOT_AGENT_DETECTION_CONFIDENCE_THRESHOLD \
+    ROBOT_AGENT_CENTER_ON_DETECTION \
+    ROBOT_AGENT_IMAGE_CENTER_TOLERANCE \
+    ROBOT_AGENT_CENTERING_MAX_ANGULAR_SPEED \
+    ROBOT_AGENT_CENTERING_GAIN \
+    ROBOT_AGENT_CENTERING_TIMEOUT_SEC \
+    ROBOT_AGENT_YOLO_MODEL \
+    ROBOT_AGENT_YOLO_INPUT_SIZE; do
+    if [[ -n "${!variable_name:-}" ]]; then
+        docker_args+=(--env "${variable_name}=${!variable_name}")
+    fi
+done
 
 docker_args+=("${IMAGE_NAME}" /app/run_robot_agent_ros.sh)
 docker "${docker_args[@]}"

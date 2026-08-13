@@ -16,7 +16,7 @@ from robot_agent.middlewares import ModelTerminationMiddleware, PlanCompletionMi
 from robot_agent.ros import build_ros2_adapter
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.skills import BehaviorTreeSkill
-from robot_agent.state import GoalBlocker
+from robot_agent.state import GoalBlocker, ToolStatus
 from robot_agent.tools.registry import RobotToolRegistry, load_locations
 
 
@@ -51,6 +51,39 @@ def build_verified_final_response(runtime: RobotAgentRuntime, run_status: str) -
     lines = [f"Status: {run_status}.", f"Verification: {evaluation.reason}."]
     if successful_tools:
         lines.append(f"Completed tools: {' -> '.join(successful_tools)}.")
+
+    successful_search = next(
+        (
+            entry["result"]["data"]
+            for entry in reversed(runtime.state.tool_history)
+            if entry["tool"] == "search_for_object"
+            and entry["result"]["status"] == ToolStatus.SUCCESS.value
+            and isinstance(entry["result"]["data"].get("found"), dict)
+        ),
+        None,
+    )
+    if successful_search is not None:
+        found = successful_search["found"]
+        lines.append(
+            "Detected object: "
+            f"label={found['label']}, confidence={float(found['confidence']):.3f}."
+        )
+        image_position = successful_search.get("image_position")
+        if isinstance(image_position, dict):
+            lines.append(
+                "Image position: "
+                f"x={float(image_position['x_px']):.1f}px, "
+                f"y={float(image_position['y_px']):.1f}px, "
+                f"normalized=({float(image_position['x_normalized']):.3f}, "
+                f"{float(image_position['y_normalized']):.3f})."
+            )
+        observation_pose = successful_search.get("observation_pose")
+        if isinstance(observation_pose, dict):
+            lines.append(
+                "Robot pose at detection: "
+                f"x={observation_pose['x']}, y={observation_pose['y']}, "
+                f"yaw={observation_pose['yaw']}, frame={observation_pose['frame_id']}."
+            )
 
     pose = evaluation.evidence.get("pose")
     if isinstance(pose, dict):

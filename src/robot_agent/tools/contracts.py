@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class NavigateToLocationInput(BaseModel):
@@ -21,6 +21,17 @@ class NavigateToPoseInput(BaseModel):
     )
 
 
+class MoveRelativeInput(BaseModel):
+    distance_m: float = Field(
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "Signed distance in meters along the robot's current heading; "
+            "positive moves forward and negative moves backward"
+        ),
+    )
+
+
 class FindObjectInput(BaseModel):
     color: str | None = Field(default=None, description="Optional object colour, e.g. blue")
     label: str | None = Field(default=None, description="Optional object label, e.g. box")
@@ -30,6 +41,22 @@ class InspectForColorInput(BaseModel):
     color: Literal["red", "green", "blue"] = Field(
         description="Color to inspect once using the TurtleBot camera"
     )
+
+
+class SearchForObjectInput(BaseModel):
+    route: list[str] = Field(
+        min_length=1,
+        max_length=12,
+        description="Ordered known-location route to traverse while detecting",
+    )
+    color: str | None = Field(default=None, description="Optional target color")
+    label: str | None = Field(default=None, description="Optional target class label")
+
+    @model_validator(mode="after")
+    def require_target(self) -> "SearchForObjectInput":
+        if not self.color and not self.label:
+            raise ValueError("search_for_object requires a color or label")
+        return self
 
 
 class BehaviorTreeSkillInput(BaseModel):

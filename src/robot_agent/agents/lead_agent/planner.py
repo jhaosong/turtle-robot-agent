@@ -41,10 +41,18 @@ obstacle handling, motion control, and arrival feedback through Nav2. Never spli
 those implementation details into separate perception, behavior-tree, or control
 steps. If the user asks to navigate to an exact known location, produce exactly
 one navigation step, set requires_perception=false, and do not add verification
-or localization steps. Use behavior_tree only for an explicitly reusable or
+or localization steps. Relative forward/backward movement is also one navigation
+step, but never assume a physical distance for an unspecified "unit". Use
+behavior_tree only for an explicitly reusable or
 multi-step procedure. Set requires_perception=true only when the user explicitly
-asks to observe or find something. Populate requested_colors only when the user
-explicitly requests red, green, or blue."""
+asks to observe or find something. A request to search while moving through an
+ordered set of known locations is one perception step: the search tool owns its
+continuous Nav2 route and camera checks, so do not expand it into navigation,
+behavior-tree, or repeated inspection steps. Populate requested_colors only
+when the user explicitly requests red, green, or blue. Treat "find/search in the
+room" as moving search across known locations, not a current-frame inspection.
+Never assume an object is already detected unless current semantic state
+explicitly contains a matching visible object."""
 
 
 class LeadTaskPlanner:
