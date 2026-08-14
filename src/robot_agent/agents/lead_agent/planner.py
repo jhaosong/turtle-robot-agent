@@ -1,6 +1,5 @@
 """Optional LLM task planner, separate from the tool-calling lead agent.
 
-The structured-output pattern is adapted from BTPG's ``GoalPlan`` generation.
 The plan is context for the lead agent; it cannot issue ROS2 commands itself.
 """
 

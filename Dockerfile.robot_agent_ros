@@ -21,8 +21,7 @@ RUN python3 -m venv --system-site-packages /opt/robot-agent-venv && \
 # archive transfers from macOS may not preserve their executable bits.
 RUN chmod 0755 \
         /entrypoint.sh \
-        /overlay_ws/src/tb3_worlds/scripts/*.py \
-        /overlay_ws/src/tb3_autonomy/scripts/*.py
+        /overlay_ws/src/tb3_worlds/scripts/*.py
 
 WORKDIR /app
 CMD ["/app/run_robot_agent_ros.sh"]

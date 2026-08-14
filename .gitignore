@@ -1,25 +1,21 @@
 .idea
 .vscode
-src/jpl_rosa.egg-info
+src/*.egg-info/
 build/
 dist/
 __pycache__/
+*.py[cod]
 docs
 .DS_Store
 
 # Secrets
 .env
-demo_bundle/.env
 .env.local
 
 # Runtime/generated files
 robot_agent_runs/
 .pytest_cache/
-*.pyc
 *.log
 *.zip
 .Rhistory
 .colcon/
-
-# External reference repository
-BTPG-main/

@@ -1,8 +1,4 @@
-"""LLM-generated, validated Behavior Tree skill for TurtleBot navigation.
-
-This adapts BTPG's useful parts: structured LLM decomposition and portable BT
-XML export. It intentionally does not import BTPG's simulator or planners.
-"""
+"""LLM-generated, validated Behavior Tree skill for TurtleBot navigation."""
 
 from __future__ import annotations
 

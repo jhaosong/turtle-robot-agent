@@ -6,18 +6,13 @@ ROS transport, semantic state, goal verification, and safety controls.
 
 ## Environment boundary
 
-The repository's root `pyproject.toml` belongs to legacy ROSA and pins LangChain
-0.3. `robot_agent` uses LangChain v1 `create_agent`; install
-`src/robot_agent/requirements.txt` in a separate virtual environment or ROS2
-container and run it with `PYTHONPATH=src` as shown below. Installing
-`robot_agent` with `pip install robot_agent` is not supported. Do not upgrade
-the root ROSA environment in place.
+`robot_agent` uses LangChain v1 `create_agent` and owns its model-provider
+loader. Install the root package or `src/robot_agent/requirements.txt` in a
+dedicated virtual environment or use the provided Docker launchers.
 
-Two dependencies remain external to this package:
-
-- `turtle_agent.scripts.llm.get_llm` supplies the configured chat model.
-- `turtlebot3_behavior_demos/tb3_worlds/maps/sim_house_locations.yaml` supplies
-  named navigation poses unless `ROBOT_AGENT_LOCATION_FILE` overrides it.
+The TurtleBot world supplies named navigation poses from
+`turtlebot3_behavior_demos/tb3_worlds/maps/sim_house_locations.yaml` unless
+`ROBOT_AGENT_LOCATION_FILE` overrides it.
 
 The launcher assumes this repository layout because `cli.py` resolves the
 project root with `Path(__file__).resolve().parents[2]`:
@@ -26,7 +21,6 @@ project root with `Path(__file__).resolve().parents[2]`:
 repository/
 ├── demo_robot_agent.sh
 ├── src/robot_agent/
-├── src/turtle_agent/
 └── turtlebot3_behavior_demos/
 ```
 
