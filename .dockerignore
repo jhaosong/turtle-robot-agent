@@ -2,8 +2,13 @@
 .env.*
 .git
 .venv*
+.DS_Store
+*.egg-info/
 __pycache__/
 *.py[cod]
+*.zip
+*.pt
+mobileclip*.ts
 build/
 install/
 log/

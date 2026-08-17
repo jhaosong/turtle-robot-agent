@@ -26,12 +26,14 @@ dependencies = [
     "pydantic>=2",
     "PyYAML>=6",
     "python-dotenv>=1",
+    "numpy==1.26.4",
+    "ultralytics==8.4.67",
+    "clip @ git+https://github.com/ultralytics/CLIP.git@488e81a6711eea7346872b46ea928b367da8889d",
 ]
 
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=1.0"]
 ollama = ["langchain-ollama>=1.0"]
-yolo = ["ultralytics>=8.0"]
 
 [project.urls]
 Homepage = "https://github.com/jhaosong/turtle-robot-agent"

@@ -78,12 +78,14 @@ class Pose2D:
 
 @dataclass
 class ImagePosition:
-    """Detection center in one camera image, not a world-frame coordinate."""
+    """Detection box in one camera image, not a world-frame coordinate."""
 
     x_px: float
     y_px: float
     x_normalized: float
     y_normalized: float
+    width_normalized: float = 0.0
+    height_normalized: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -120,6 +122,31 @@ class Detection:
                 else None
             ),
         )
+
+
+def matching_goal_detections(
+    goal_requirements: dict[str, Any],
+    visible_objects: list[Detection],
+) -> list[Detection]:
+    """Return detections satisfying every explicitly requested attribute."""
+    requested_colors = set(goal_requirements.get("requested_colors") or [])
+    requested_labels = set(goal_requirements.get("requested_labels") or [])
+    if not requested_colors and not requested_labels:
+        return list(visible_objects)
+    return [
+        detection
+        for detection in visible_objects
+        if (not requested_colors or detection.color in requested_colors)
+        and (not requested_labels or detection.label in requested_labels)
+    ]
+
+
+def goal_requirements_satisfied(
+    goal_requirements: dict[str, Any],
+    visible_objects: list[Detection],
+) -> bool:
+    """Determine whether semantic detections satisfy a perception goal."""
+    return bool(matching_goal_detections(goal_requirements, visible_objects))
 
 
 @dataclass
@@ -247,7 +274,7 @@ class RunState:
 
     def to_semantic_session_state(self) -> SemanticSessionState:
         return SemanticSessionState(
-            robot_state=self.robot_state,
+            robot_state=RobotState.from_snapshot(self.robot_state.to_agent_context()),
             visited_locations=list(self.visited_locations),
         )
 

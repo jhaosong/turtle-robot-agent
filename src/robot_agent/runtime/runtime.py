@@ -11,7 +11,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from robot_agent.config.settings import RobotAgentSettings
-from robot_agent.state import RunState, SemanticSessionState, ToolResult, ToolStatus
+from robot_agent.state import (
+    RunState,
+    SemanticSessionState,
+    ToolResult,
+    ToolStatus,
+    goal_requirements_satisfied,
+)
 
 from .checkpoint import JsonCheckpointStore
 from .events import RuntimeEvent
@@ -19,6 +25,10 @@ from .journal import RunJournal
 
 
 class RobotAgentRuntime:
+    # High-rate telemetry remains available in events.jsonl without flooding
+    # the interactive agent terminal.
+    _JOURNAL_ONLY_EVENTS = {"detector_sampled"}
+
     _TOOL_CAPABILITIES = {
         "navigate_to": "navigation",
         "navigate_to_pose": "navigation",
@@ -61,7 +71,7 @@ class RobotAgentRuntime:
     def emit(self, event_type: str, payload: dict, category: str = "lifecycle") -> None:
         event = RuntimeEvent(run_id=self.state.run_id, type=event_type, payload=payload, category=category)
         self.journal.append(event)
-        if self.settings.trace:
+        if self.settings.trace and event_type not in self._JOURNAL_ONLY_EVENTS:
             print(f"[ROBOT AGENT] {event_type}: {payload}")
 
     def record_tool_result(self, tool_name: str, arguments: dict, result: ToolResult) -> None:
@@ -118,12 +128,9 @@ class RobotAgentRuntime:
             and capability == "perception"
             and self.state.goal_requirements.get("requires_perception", False)
         ):
-            requested_colors = set(
-                self.state.goal_requirements.get("requested_colors") or []
-            )
-            completed = any(
-                not requested_colors or detection.color in requested_colors
-                for detection in self.state.robot_state.visible_objects
+            completed = goal_requirements_satisfied(
+                self.state.goal_requirements,
+                self.state.robot_state.visible_objects,
             )
         if completed:
             step["status"] = "completed"

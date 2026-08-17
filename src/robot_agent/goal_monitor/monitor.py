@@ -7,7 +7,14 @@ observations and dry-run commands can never be marked successful.
 
 from __future__ import annotations
 
-from robot_agent.state import GoalBlocker, GoalEvaluation, RunState, ToolStatus
+from robot_agent.state import (
+    GoalBlocker,
+    GoalEvaluation,
+    RunState,
+    ToolStatus,
+    goal_requirements_satisfied,
+    matching_goal_detections,
+)
 
 
 class GoalMonitor:
@@ -57,14 +64,15 @@ class GoalMonitor:
         if state.goal_requirements.get("requires_perception", False):
             if not state.robot_state.last_perception_at:
                 return GoalEvaluation(False, GoalBlocker.MISSING_EVIDENCE, "Goal requires perception but no semantic observation exists")
-            requested_colors = set(state.goal_requirements.get("requested_colors") or [])
-            matches = [
-                item
-                for item in state.robot_state.visible_objects
-                if not requested_colors or item.color in requested_colors
-            ]
-            if not matches:
+            if not goal_requirements_satisfied(
+                state.goal_requirements,
+                state.robot_state.visible_objects,
+            ):
                 return GoalEvaluation(False, GoalBlocker.GOAL_NOT_MET_YET, "Perception ran but did not verify the requested object")
+            matches = matching_goal_detections(
+                state.goal_requirements,
+                state.robot_state.visible_objects,
+            )
             return GoalEvaluation(
                 True,
                 GoalBlocker.NONE,

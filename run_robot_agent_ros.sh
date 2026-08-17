@@ -14,21 +14,17 @@ if [[ "${ROBOT_AGENT_GUI:-false}" == "true" ]]; then
         echo "Error: TurtleBot3 RViz configuration not found: ${rviz_config}" >&2
         exit 1
     fi
-    # TurtleBot3's Humble config ships a disabled Realsense group pointed at
-    # an obsolete topic. Adapt that display to this demo's Gazebo camera.
-    sed -i -z \
-        -e 's|Value: /intel_realsense_r200_depth/image_raw|Value: /camera/image_raw|' \
-        -e 's|      Enabled: false\n      Name: Realsense|      Enabled: true\n      Name: Realsense|' \
-        -e 's|Name: RealsenseCamera|Name: Image|' \
-        -e 's|Name: Realsense\n|Name: Camera\n|' \
-        -e 's|\n  X: [0-9-]*\n  Y: [0-9-]*\n*$|\n  X: 0\n  Y: 0\n|' \
-        "${rviz_config}"
-    if ! grep -Fq 'Value: /camera/image_raw' "${rviz_config}" || \
-       ! grep -B1 -F 'Name: Camera' "${rviz_config}" | grep -Fq 'Enabled: true'; then
-        echo "Error: Failed to configure the RViz camera display." >&2
+    robot_agent_rviz_config=/tmp/robot-agent-navigation.rviz
+    python /app/src/robot_agent/runtime/rviz_config.py \
+        "${rviz_config}" \
+        "${robot_agent_rviz_config}"
+    if ! grep -Fq 'Value: /camera/image_raw' "${robot_agent_rviz_config}" || \
+       ! grep -Fq 'Value: /camera/yoloe_annotated' "${robot_agent_rviz_config}"; then
+        echo "Error: Failed to configure the two RViz camera displays." >&2
         exit 1
     fi
-    echo "RViz camera display enabled on /camera/image_raw"
+    cp "${robot_agent_rviz_config}" "${rviz_config}"
+    echo "RViz right side configured with Raw Image and YOLOE Annotated"
     xvfb_pid=""
 else
     export DISPLAY="${DISPLAY:-:99}"

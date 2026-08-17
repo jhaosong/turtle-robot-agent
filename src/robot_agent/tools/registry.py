@@ -57,15 +57,48 @@ class RobotToolRegistry:
         self.locations = load_locations(runtime.settings.location_file)
         self.world = WorldModel(runtime.state.robot_state)
         self.safety = SafetyValidator(runtime.settings)
-        self.detector = detector or build_detector(
-            runtime.settings.detector_backend,
-            yolo_model=runtime.settings.yolo_model,
-            yolo_input_size=runtime.settings.yolo_input_size,
-        )
+        self.detector = detector
         self.loop_detector = ToolLoopDetector(
             warn_threshold=runtime.settings.loop_warn_threshold,
             hard_limit=runtime.settings.repeated_tool_limit,
         )
+
+    def _get_detector(self) -> Detector:
+        """Load heavyweight perception models only when a tool needs them."""
+        if self.detector is None:
+            self.detector = build_detector(
+                self.runtime.settings.detector_backend,
+                yolo_model=self.runtime.settings.yolo_model,
+                yoloe_model=self.runtime.settings.yoloe_model,
+                yolo_input_size=self.runtime.settings.yolo_input_size,
+                confidence_threshold=min(
+                    self.runtime.settings.detection_box_threshold,
+                    self.runtime.settings.detection_tracking_confidence_threshold,
+                ),
+            )
+            self.runtime.emit(
+                "detector_ready",
+                {
+                    "backend": self.runtime.settings.detector_backend,
+                    "model": (
+                        self.runtime.settings.yoloe_model
+                        if self.runtime.settings.detector_backend == "yoloe"
+                        else self.runtime.settings.yolo_model
+                        if self.runtime.settings.detector_backend == "yolo"
+                        else None
+                    ),
+                    "interval_sec": self.runtime.settings.detection_interval_sec,
+                    "target_frequency_hz": round(
+                        1.0 / self.runtime.settings.detection_interval_sec, 3
+                    ),
+                    "box_threshold": self.runtime.settings.detection_box_threshold,
+                    "stop_threshold": self.runtime.settings.detection_confidence_threshold,
+                    "tracking_threshold": self.runtime.settings.detection_tracking_confidence_threshold,
+                    "tracking_max_center_jump": self.runtime.settings.detection_tracking_max_center_jump,
+                },
+                category="perception",
+            )
+        return self.detector
 
     def _execute(self, tool_name: str, arguments: dict, operation) -> ToolResult:
         loop_decision = None
@@ -234,27 +267,136 @@ class RobotToolRegistry:
         unknown = [location for location in route if location not in self.locations]
         if unknown:
             raise ValueError(f"Unknown search locations: {unknown}")
-        self.detector.validate_query(color=color, label=label)
+        detector = self._get_detector()
+        detector.validate_query(color=color, label=label)
 
         observed_frames = 0
         legs: list[dict[str, Any]] = []
+        diagnostic_last_emitted_at = 0.0
+        diagnostic_samples = 0
+        diagnostic_candidate_frames = 0
+        diagnostic_candidates = 0
+        diagnostic_best_confidence: float | None = None
+        detection_streak = 0
+        target_acquired = False
+        tracked_detection: Detection | None = None
+
+        # Clear detections from a previous query. During this search, a brief
+        # candidate remains visible until the adapter's overlay TTL expires.
+        self.ros.update_detection_overlay([])
 
         def detect_latest() -> Detection | None:
             nonlocal observed_frames
+            nonlocal diagnostic_last_emitted_at
+            nonlocal diagnostic_samples
+            nonlocal diagnostic_candidate_frames
+            nonlocal diagnostic_candidates
+            nonlocal diagnostic_best_confidence
+            nonlocal detection_streak
+            nonlocal target_acquired
+            nonlocal tracked_detection
             image = self.ros.get_camera_frame()
             if image is None:
                 return None
             observed_frames += 1
-            matches = self.detector.detect(image, color=color, label=label)
+            inference_started = time.monotonic()
+            matches = detector.detect(image, color=color, label=label)
+            inference_ms = (time.monotonic() - inference_started) * 1000.0
+            # Tracking can use weaker boxes after acquisition, but RViz only
+            # displays boxes that meet the user-facing box threshold.
+            overlay_matches = [
+                item
+                for item in matches
+                if item.confidence >= self.runtime.settings.detection_box_threshold
+            ]
+            self.ros.update_detection_overlay(overlay_matches)
+            diagnostic_samples += 1
+            diagnostic_candidates += len(matches)
+            if matches:
+                diagnostic_candidate_frames += 1
+                frame_best = max(item.confidence for item in matches)
+                diagnostic_best_confidence = max(
+                    diagnostic_best_confidence or frame_best,
+                    frame_best,
+                )
+            now = time.monotonic()
+            stop_candidate = any(
+                item.confidence
+                >= self.runtime.settings.detection_confidence_threshold
+                for item in matches
+            )
+            if (
+                diagnostic_last_emitted_at == 0.0
+                or now - diagnostic_last_emitted_at >= 1.0
+                or stop_candidate
+            ):
+                self.runtime.emit(
+                    "detector_sampled",
+                    {
+                        "backend": self.runtime.settings.detector_backend,
+                        "query": {"label": label, "color": color},
+                        "samples": diagnostic_samples,
+                        "candidate_frames": diagnostic_candidate_frames,
+                        "candidates": diagnostic_candidates,
+                        "best_confidence": diagnostic_best_confidence,
+                        "last_inference_ms": round(inference_ms, 1),
+                        "box_threshold": self.runtime.settings.detection_box_threshold,
+                        "stop_threshold": self.runtime.settings.detection_confidence_threshold,
+                    },
+                    category="perception",
+                )
+                diagnostic_last_emitted_at = now
+                diagnostic_samples = 0
+                diagnostic_candidate_frames = 0
+                diagnostic_candidates = 0
+                diagnostic_best_confidence = None
+            active_threshold = (
+                self.runtime.settings.detection_tracking_confidence_threshold
+                if target_acquired
+                else self.runtime.settings.detection_confidence_threshold
+            )
             matches = [
                 item
                 for item in matches
-                if item.confidence
-                >= self.runtime.settings.detection_confidence_threshold
+                if item.confidence >= active_threshold
             ]
             if not matches:
+                detection_streak = 0
                 return None
-            return max(matches, key=lambda item: item.confidence)
+
+            candidate = max(matches, key=lambda item: item.confidence)
+            if (
+                target_acquired
+                and tracked_detection is not None
+                and tracked_detection.image_position is not None
+            ):
+                previous = tracked_detection.image_position
+                positioned_matches = [
+                    item for item in matches if item.image_position is not None
+                ]
+                if not positioned_matches:
+                    return None
+                candidate = min(
+                    positioned_matches,
+                    key=lambda item: math.hypot(
+                        item.image_position.x_normalized - previous.x_normalized,
+                        item.image_position.y_normalized - previous.y_normalized,
+                    ),
+                )
+                center_jump = math.hypot(
+                    candidate.image_position.x_normalized - previous.x_normalized,
+                    candidate.image_position.y_normalized - previous.y_normalized,
+                )
+                if center_jump > self.runtime.settings.detection_tracking_max_center_jump:
+                    return None
+            if not target_acquired:
+                detection_streak += 1
+                if detection_streak < self.runtime.settings.detection_confirmation_frames:
+                    tracked_detection = candidate
+                    return None
+                target_acquired = True
+            tracked_detection = candidate
+            return candidate
 
         for location in route:
             pose = self.locations[location]
@@ -274,23 +416,72 @@ class RobotToolRegistry:
             found_payload = navigation.data.get("found")
             if isinstance(found_payload, dict):
                 found = Detection.from_snapshot(found_payload)
-                cancellation_confirmed = navigation.status == ToolStatus.SUCCESS
+                cancellation_confirmed = (
+                    navigation.status == ToolStatus.SUCCESS
+                    and navigation.data.get("navigation_canceled") is True
+                )
                 centering = None
                 centered: bool | None = None
                 final_status = navigation.status
                 final_error = navigation.error
                 final_retryable = navigation.retryable
+                if not cancellation_confirmed:
+                    final_status = ToolStatus.FAILED
+                    final_error = (
+                        "Target detection was reported without confirmed Nav2 cancellation"
+                    )
+                    final_retryable = True
                 if (
                     cancellation_confirmed
                     and self.runtime.settings.center_on_detection
                 ):
-                    centering = self.ros.center_target_in_view(
-                        detect_latest,
+                    initial_alignment_detection = found
+
+                    def detect_for_alignment() -> Detection | None:
+                        nonlocal initial_alignment_detection
+                        if initial_alignment_detection is not None:
+                            detection = initial_alignment_detection
+                            initial_alignment_detection = None
+                            return detection
+                        return detect_latest()
+
+                    self.runtime.emit(
+                        "visual_alignment_started",
+                        {
+                            "found": found.to_dict(),
+                            "target_x_normalized": 0.5,
+                            "target_height_normalized": self.runtime.settings.target_box_size_normalized,
+                            "phases": ["rotate", "approach"],
+                            "stable_frames": self.runtime.settings.centering_stable_frames,
+                            "detection_hold_sec": self.runtime.settings.centering_detection_hold_sec,
+                        },
+                        category="perception",
+                    )
+                    centering = self.ros.align_to_detection(
+                        detect_for_alignment,
                         tick_interval_sec=self.runtime.settings.detection_interval_sec,
                         horizontal_tolerance=self.runtime.settings.image_center_tolerance,
+                        target_box_size=self.runtime.settings.target_box_size_normalized,
+                        box_size_tolerance=self.runtime.settings.box_size_tolerance,
                         max_angular_speed=self.runtime.settings.centering_max_angular_speed,
-                        gain=self.runtime.settings.centering_gain,
+                        min_angular_speed=self.runtime.settings.centering_min_angular_speed,
+                        angular_gain=self.runtime.settings.centering_gain,
+                        max_linear_speed=self.runtime.settings.centering_max_linear_speed,
+                        min_linear_speed=self.runtime.settings.centering_min_linear_speed,
+                        linear_gain=self.runtime.settings.centering_linear_gain,
                         timeout_sec=self.runtime.settings.centering_timeout_sec,
+                        stable_frames=self.runtime.settings.centering_stable_frames,
+                        detection_hold_sec=self.runtime.settings.centering_detection_hold_sec,
+                    )
+                    self.runtime.emit(
+                        "visual_alignment_finished",
+                        {
+                            "status": centering.status.value,
+                            "error": centering.error,
+                            "duration_sec": centering.duration_sec,
+                            "result": centering.data,
+                        },
+                        category="perception",
                     )
                     centered = centering.status == ToolStatus.SUCCESS
                     centered_payload = centering.data.get("found")
@@ -338,6 +529,9 @@ class RobotToolRegistry:
                         "observed_frames": observed_frames,
                         "detection_interval_sec": self.runtime.settings.detection_interval_sec,
                         "confidence_threshold": self.runtime.settings.detection_confidence_threshold,
+                        "tracking_confidence_threshold": self.runtime.settings.detection_tracking_confidence_threshold,
+                        "tracking_max_center_jump": self.runtime.settings.detection_tracking_max_center_jump,
+                        "confirmation_frames": self.runtime.settings.detection_confirmation_frames,
                         "navigation_canceled": cancellation_confirmed,
                         "centering_requested": self.runtime.settings.center_on_detection,
                         "centered": centered,
@@ -494,9 +688,38 @@ class RobotToolRegistry:
                     )
                 )
                 if should_retry:
-                    adjustment = self.ros.adjust_for_perception(
-                        self.runtime.settings.active_perception_backoff_speed,
-                        self.runtime.settings.active_perception_backoff_duration_sec,
+                    # Agent tools execute sequentially and this path does not own or
+                    # cancel a Nav2 goal. Cancellation handoff settling is therefore
+                    # centralized in RclpyRos2Adapter.cancel_navigation(), not here.
+                    def detect_for_alignment() -> Detection | None:
+                        nonlocal observed, attempts
+                        observed = self.ros.detect_color(color)
+                        attempts += 1
+                        if observed.status != ToolStatus.SUCCESS:
+                            return None
+                        detections = [
+                            Detection.from_snapshot(item)
+                            for item in observed.data.get("detections", [])
+                        ]
+                        if not detections:
+                            return None
+                        return max(detections, key=lambda item: item.confidence)
+
+                    adjustment = self.ros.align_to_detection(
+                        detect_for_alignment,
+                        tick_interval_sec=self.runtime.settings.detection_interval_sec,
+                        horizontal_tolerance=self.runtime.settings.image_center_tolerance,
+                        target_box_size=self.runtime.settings.target_box_size_normalized,
+                        box_size_tolerance=self.runtime.settings.box_size_tolerance,
+                        max_angular_speed=self.runtime.settings.centering_max_angular_speed,
+                        min_angular_speed=self.runtime.settings.centering_min_angular_speed,
+                        angular_gain=self.runtime.settings.centering_gain,
+                        max_linear_speed=self.runtime.settings.centering_max_linear_speed,
+                        min_linear_speed=self.runtime.settings.centering_min_linear_speed,
+                        linear_gain=self.runtime.settings.centering_linear_gain,
+                        timeout_sec=self.runtime.settings.centering_timeout_sec,
+                        stable_frames=self.runtime.settings.centering_stable_frames,
+                        detection_hold_sec=self.runtime.settings.centering_detection_hold_sec,
                     )
                     if adjustment.status != ToolStatus.SUCCESS:
                         return ToolResult(
@@ -505,8 +728,12 @@ class RobotToolRegistry:
                             error=adjustment.error or "Active perception adjustment failed",
                             retryable=adjustment.retryable,
                         )
-                    observed = self.ros.detect_color(color)
-                    attempts += 1
+                    aligned_payload = adjustment.data.get("found")
+                    if isinstance(aligned_payload, dict):
+                        observed = ToolResult(
+                            status=ToolStatus.SUCCESS,
+                            data={"detections": [aligned_payload]},
+                        )
                 if observed.status == ToolStatus.SUCCESS:
                     detections = [
                         Detection.from_snapshot(item)
@@ -641,7 +868,8 @@ class RobotToolRegistry:
                 description=(
                     "Search for an object while Nav2 continuously traverses an ordered route of known locations; "
                     "navigation is canceled only when detection reaches the configured confidence threshold. "
-                    "For a color search omit label or use label='colored_object'; color blobs cannot verify classes."
+                    "With the default YOLOE backend, pass a concrete open-vocabulary text label; "
+                    "the color_blob fallback only supports label='colored_object'."
                 ),
             ),
             StructuredTool.from_function(run_behavior_tree, args_schema=BehaviorTreeSkillInput, description="Generate, validate, persist, and execute a behavior tree skill for a multi-step TurtleBot goal."),

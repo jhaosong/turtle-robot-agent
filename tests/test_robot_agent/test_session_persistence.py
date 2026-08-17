@@ -8,7 +8,7 @@ from robot_agent.config import RobotAgentSettings
 from robot_agent.ros import Ros2Adapter, build_ros2_adapter
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.skills import BehaviorTreeSkill
-from robot_agent.state import Pose2D, ToolResult, ToolStatus
+from robot_agent.state import Pose2D, RunState, ToolResult, ToolStatus
 from robot_agent.tools.registry import RobotToolRegistry
 
 
@@ -31,6 +31,15 @@ class SuccessfulRosAdapter(Ros2Adapter):
 
 
 class SessionPersistenceTest(unittest.TestCase):
+    def test_semantic_snapshot_does_not_alias_live_robot_state(self):
+        run_state = RunState(run_id="test", goal="snapshot")
+        run_state.robot_state.pose = Pose2D(1.0, 2.0, 0.5)
+
+        snapshot = run_state.to_semantic_session_state()
+        run_state.robot_state.pose.x = 9.0
+
+        self.assertEqual(snapshot.robot_state.pose.x, 1.0)
+
     def _settings(self, root: Path, *, execute_ros2: bool) -> RobotAgentSettings:
         location_file = root / "locations.yaml"
         location_file.write_text("kitchen: [1.5, -0.5, 0.25]\n", encoding="utf-8")

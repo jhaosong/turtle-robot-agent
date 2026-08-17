@@ -46,16 +46,16 @@ def generate_launch_description():
         parameters=[{"use_sim_time": use_sim_time}],
     )
 
-    # Spawn blocks
-    spawn_blocks = Node(
+    # Spawn the semantic-search target in front of its named observation pose.
+    spawn_fire_extinguisher = Node(
         package="tb3_worlds",
-        executable="block_spawner.py",
-        name="block_spawner",
+        executable="fire_extinguisher_spawner.py",
+        name="fire_extinguisher_spawner",
         parameters=[
             {"location_file": join(tb3_world_dir, "maps", "sim_house_locations.yaml")}
         ],
     )
 
     return LaunchDescription(
-        [spawn_world_delayed, nav_stack, amcl_init_pose, spawn_blocks]
+        [spawn_world_delayed, nav_stack, amcl_init_pose, spawn_fire_extinguisher]
     )

@@ -63,6 +63,52 @@ class PlanTestRosAdapter(Ros2Adapter):
 
 
 class PlanCompletionTest(unittest.TestCase):
+    def test_label_requirement_controls_perception_plan_completion(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            location_file = root / "locations.yaml"
+            location_file.write_text("location1: [1.0, 2.0, 0.0]\n", encoding="utf-8")
+            runtime = RobotAgentRuntime(
+                RobotAgentSettings(
+                    location_file=location_file,
+                    run_directory=root / "runs",
+                    trace=False,
+                    max_no_progress_continuations=5,
+                ),
+                "find fire extinguisher",
+            )
+            runtime.state.goal_requirements = {
+                "requires_perception": True,
+                "requested_labels": ["fire extinguisher"],
+            }
+            runtime.state.plan = [
+                {
+                    "description": "search for fire extinguisher",
+                    "preferred_capability": "perception",
+                    "status": "pending",
+                }
+            ]
+            runtime.state.robot_state.visible_objects = [
+                Detection("trash can", 0.9)
+            ]
+
+            runtime.record_tool_result(
+                "search_for_object",
+                {"route": ["location1"], "label": "fire extinguisher"},
+                ToolResult(status=ToolStatus.SUCCESS, data={"found": {}}),
+            )
+            self.assertEqual(runtime.state.plan[0]["status"], "pending")
+
+            runtime.state.robot_state.visible_objects = [
+                Detection("fire extinguisher", 0.9)
+            ]
+            runtime.record_tool_result(
+                "search_for_object",
+                {"route": ["location1"], "label": "fire extinguisher"},
+                ToolResult(status=ToolStatus.SUCCESS, data={"found": {}}),
+            )
+            self.assertEqual(runtime.state.plan[0]["status"], "completed")
+
     def test_empty_perception_does_not_complete_find_step(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

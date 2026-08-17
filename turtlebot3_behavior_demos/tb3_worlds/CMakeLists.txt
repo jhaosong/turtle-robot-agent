@@ -15,7 +15,7 @@ find_package(turtlebot3_gazebo REQUIRED)
 
 # Install programs
 install(PROGRAMS
-    scripts/block_spawner.py
+    scripts/fire_extinguisher_spawner.py
     scripts/set_init_amcl_pose.py
     DESTINATION lib/${PROJECT_NAME}
 )

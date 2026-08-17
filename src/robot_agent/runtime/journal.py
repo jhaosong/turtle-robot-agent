@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from .events import RuntimeEvent
+from .serialization import sanitize_json_value
 
 
 class RunJournal:
@@ -38,5 +39,6 @@ class RunJournal:
             timestamp=event.timestamp,
         )
         with self.path.open("a", encoding="utf-8") as output:
-            output.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+            payload = sanitize_json_value(event.to_dict())
+            output.write(json.dumps(payload, ensure_ascii=True) + "\n")
         return event

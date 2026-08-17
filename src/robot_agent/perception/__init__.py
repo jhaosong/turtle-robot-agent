@@ -6,6 +6,7 @@ from .detector import (
     Detector,
     VlmDetector,
     YoloDetector,
+    YoloeDetector,
     build_detector,
 )
 
@@ -14,6 +15,7 @@ __all__ = [
     "Detector",
     "VlmDetector",
     "YoloDetector",
+    "YoloeDetector",
     "build_detector",
     "detect_colored_blobs",
 ]

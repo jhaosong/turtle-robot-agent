@@ -37,17 +37,20 @@ translate an unknown place name into invented coordinates. Use move_relative
 for forward/backward distance commands; distance must be explicitly stated in
 meters. Never calculate relative map coordinates yourself from remembered state.
 If the user says only "unit" without meters, ask for clarification instead of
-assuming one meter. For a supported color,
-use inspect_for_color before find_object when inspecting only the current camera
-view. Use search_for_object for search-while-moving over an explicit ordered
+assuming one meter. For a one-frame legacy color check, use inspect_for_color
+before find_object when inspecting only the current camera view. The default
+detector is open-vocabulary YOLOE: for semantic search pass a concrete text
+label such as "fire extinguisher" to search_for_object; color is optional
+context and label is the primary detector prompt. Use search_for_object for
+search-while-moving over an explicit ordered
 route of known locations; it performs detection during each uninterrupted Nav2
 leg and stops the route on the first match. When the user asks to find/search
 "in the room" or environment without naming a route, call search_for_object
 with every known location in catalog order. Do not substitute a one-frame
-inspect_for_color call. Do not emulate moving search with a
-behavior tree or repeated inspect calls. For a color search, pass the color and
-omit label (or use label=colored_object); a color blob detector cannot verify a
-natural-language class such as box or chair;
+inspect_for_color call. Do not emulate moving search with a behavior tree or
+repeated inspect calls. Only when the configured backend is color_blob should
+you omit label (or use label=colored_object); that legacy backend cannot verify
+a natural-language class such as box, chair, or fire extinguisher.
 find_object only queries the semantic world model and cannot make an observation.
 Use stop_robot for a safe stop. The rclpy backend cancels this run's active Nav2
 goal before publishing zero velocity; the CLI backend is best-effort only. Use

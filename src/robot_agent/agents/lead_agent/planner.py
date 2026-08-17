@@ -22,11 +22,14 @@ class TaskPlan(BaseModel):
     steps: list[PlannedStep] = Field(default_factory=list, max_length=8)
     requires_perception: bool = False
     requested_colors: list[Literal["red", "green", "blue"]] = Field(default_factory=list, max_length=3)
+    requested_labels: list[str] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def validate_requirements(self) -> "TaskPlan":
-        if self.requested_colors and not self.requires_perception:
-            raise ValueError("requested_colors requires requires_perception=true")
+        if (self.requested_colors or self.requested_labels) and not self.requires_perception:
+            raise ValueError(
+                "requested_colors and requested_labels require requires_perception=true"
+            )
         return self
 
 
@@ -48,7 +51,10 @@ asks to observe or find something. A request to search while moving through an
 ordered set of known locations is one perception step: the search tool owns its
 continuous Nav2 route and camera checks, so do not expand it into navigation,
 behavior-tree, or repeated inspection steps. Populate requested_colors only
-when the user explicitly requests red, green, or blue. Treat "find/search in the
+when the user explicitly requests red, green, or blue. Populate requested_labels
+with each concrete semantic object requested by a find/search goal, using the
+same label wording that the perception tool should query (for example,
+"fire extinguisher"). A goal may require colors, labels, or both. Treat "find/search in the
 room" as moving search across known locations, not a current-frame inspection.
 Never assume an object is already detected unless current semantic state
 explicitly contains a matching visible object."""

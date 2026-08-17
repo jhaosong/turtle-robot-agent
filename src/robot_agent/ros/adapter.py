@@ -79,36 +79,48 @@ class Ros2Adapter(ABC):
         """Return the latest BGR image without exposing it to agent context."""
         return None
 
-    def center_target_in_view(
+    def update_detection_overlay(self, detections: list[Detection]) -> None:
+        """Update boxes rendered on the annotated camera stream when supported."""
+        _ = detections
+
+    def align_to_detection(
         self,
         on_tick: Callable[[], Detection | None],
         *,
         tick_interval_sec: float,
         horizontal_tolerance: float,
+        target_box_size: float,
+        box_size_tolerance: float,
         max_angular_speed: float,
-        gain: float,
+        min_angular_speed: float = 0.025,
+        angular_gain: float,
+        max_linear_speed: float,
+        min_linear_speed: float = 0.02,
+        linear_gain: float,
         timeout_sec: float,
+        stable_frames: int = 3,
+        detection_hold_sec: float = 1.0,
     ) -> ToolResult:
         _ = (
             on_tick,
             tick_interval_sec,
             horizontal_tolerance,
+            target_box_size,
+            box_size_tolerance,
             max_angular_speed,
-            gain,
+            min_angular_speed,
+            angular_gain,
+            max_linear_speed,
+            min_linear_speed,
+            linear_gain,
             timeout_sec,
+            stable_frames,
+            detection_hold_sec,
         )
         return ToolResult(
             status=ToolStatus.FAILED,
-            data={"operation": "center_target_in_view"},
-            error="ROS2 backend does not support visual centering",
-            retryable=False,
-        )
-
-    def adjust_for_perception(self, linear_x: float, duration_sec: float) -> ToolResult:
-        return ToolResult(
-            status=ToolStatus.FAILED,
-            data={"operation": "adjust_for_perception"},
-            error="ROS2 backend does not support active perception adjustment",
+            data={"operation": "align_to_detection"},
+            error="ROS2 backend does not support visual alignment",
             retryable=False,
         )
 
@@ -181,9 +193,21 @@ class Ros2CliAdapter(Ros2Adapter):
         on_tick: Callable[[], Detection | None],
         tick_interval_sec: float,
     ) -> ToolResult:
-        """CLI cannot interleave camera processing; delegate without ticking."""
+        """Reject watched navigation because CLI cannot interleave callbacks."""
         _ = on_tick, tick_interval_sec
-        return self.navigate_to_pose(pose)
+        return ToolResult(
+            status=ToolStatus.FAILED,
+            data={
+                "backend": "ros2_cli",
+                "operation": "navigate_to_pose_with_watch",
+                "target_pose": pose.to_dict(),
+            },
+            error=(
+                "Watched navigation and visual alignment require "
+                "ROBOT_AGENT_ROS_BACKEND=rclpy"
+            ),
+            retryable=False,
+        )
 
     def stop_robot(self) -> ToolResult:
         message = "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
@@ -244,28 +268,6 @@ class Ros2CliAdapter(Ros2Adapter):
             retryable=False,
         )
 
-    def adjust_for_perception(self, linear_x: float, duration_sec: float) -> ToolResult:
-        rate_hz = 10
-        count = max(1, math.ceil(duration_sec * rate_hz))
-        move = (
-            f"{{linear: {{x: {linear_x:.3f}, y: 0.0, z: 0.0}}, "
-            "angular: {x: 0.0, y: 0.0, z: 0.0}}"
-        )
-        stop = "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
-        command = (
-            f"ros2 topic pub --times {count} {self.settings.cmd_vel_topic} geometry_msgs/msg/Twist \"{move}\" --rate {rate_hz} "
-            f"&& ros2 topic pub --times 3 {self.settings.cmd_vel_topic} geometry_msgs/msg/Twist \"{stop}\" --rate 10"
-        )
-        return self._run(
-            command,
-            {
-                "operation": "adjust_for_perception",
-                "linear_x": linear_x,
-                "duration_sec": duration_sec,
-            },
-        )
-
-
 class RclpyRos2Adapter(Ros2Adapter):
     """In-process ROS2 implementation for Nav2 and emergency stopping."""
 
@@ -278,6 +280,12 @@ class RclpyRos2Adapter(Ros2Adapter):
             from sensor_msgs.msg import Image
             from rclpy.action import ActionClient
             from rclpy.node import Node
+            from rclpy.qos import (
+                DurabilityPolicy,
+                HistoryPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+            )
             from rclpy.time import Time
             from tf2_ros import Buffer, TransformException, TransformListener
         except ImportError as exc:  # pragma: no cover - depends on ROS install
@@ -301,10 +309,29 @@ class RclpyRos2Adapter(Ros2Adapter):
             spin_thread=False,
         )
         self._publisher = self._node.create_publisher(Twist, settings.cmd_vel_topic, 10)
+        self._annotated_image_publisher = self._node.create_publisher(
+            Image,
+            settings.annotated_camera_topic,
+            10,
+        )
         self._latest_pose: Pose2D | None = None
         self._latest_image: Any | None = None
+        self._detection_overlay: list[Detection] = []
+        self._detection_overlay_updated_at = 0.0
+        self._annotation_warning_emitted = False
         self._node.create_subscription(Odometry, settings.odom_topic, self._on_odom, 10)
-        self._node.create_subscription(Image, settings.camera_topic, self._on_image, 10)
+        camera_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._node.create_subscription(
+            Image,
+            settings.camera_topic,
+            self._on_image,
+            camera_qos,
+        )
         self._nav_client = ActionClient(self._node, NavigateToPose, settings.nav_action_name)
         self._active_goal_handle: Any | None = None
         self._active_result_future: Any | None = None
@@ -321,6 +348,68 @@ class RclpyRos2Adapter(Ros2Adapter):
 
     def _on_image(self, message: Any) -> None:
         self._latest_image = message
+        self._publish_annotated_image(message)
+
+    def update_detection_overlay(self, detections: list[Detection]) -> None:
+        self._detection_overlay = list(detections)
+        self._detection_overlay_updated_at = time.monotonic()
+
+    def _publish_annotated_image(self, message: Any) -> None:
+        """Republish camera frames with the latest short-lived detection boxes."""
+        get_count = getattr(
+            self._annotated_image_publisher,
+            "get_subscription_count",
+            None,
+        )
+        if callable(get_count) and get_count() <= 0:
+            return
+        try:
+            import cv2
+            from cv_bridge import CvBridge
+
+            bridge = CvBridge()
+            frame = bridge.imgmsg_to_cv2(message, desired_encoding="bgr8").copy()
+            frame_height, frame_width = frame.shape[:2]
+            overlay_ttl = max(0.25, self.settings.detection_interval_sec * 1.5)
+            detections = (
+                self._detection_overlay
+                if time.monotonic() - self._detection_overlay_updated_at <= overlay_ttl
+                else []
+            )
+            for detection in detections:
+                position = detection.image_position
+                if position is None:
+                    continue
+                half_width = position.width_normalized * frame_width / 2.0
+                half_height = position.height_normalized * frame_height / 2.0
+                center_x = position.x_normalized * frame_width
+                center_y = position.y_normalized * frame_height
+                left = max(0, min(frame_width - 1, round(center_x - half_width)))
+                top = max(0, min(frame_height - 1, round(center_y - half_height)))
+                right = max(0, min(frame_width - 1, round(center_x + half_width)))
+                bottom = max(0, min(frame_height - 1, round(center_y + half_height)))
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                caption = f"{detection.label} {detection.confidence:.2f}"
+                cv2.putText(
+                    frame,
+                    caption,
+                    (left, max(18, top - 7)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+            annotated = bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            annotated.header = message.header
+            self._annotated_image_publisher.publish(annotated)
+        except Exception as exc:  # Visualization must never interrupt control.
+            if not self._annotation_warning_emitted:
+                self._node.get_logger().warning(
+                    f"Annotated camera stream disabled after rendering error: {exc}"
+                )
+                self._annotation_warning_emitted = True
+            return
 
     def navigate_to_pose(self, pose: Pose2D) -> ToolResult:
         started = time.monotonic()
@@ -532,9 +621,11 @@ class RclpyRos2Adapter(Ros2Adapter):
 
     def stop_robot(self) -> ToolResult:
         cancel_result = self.cancel_navigation() if self._active_goal_handle is not None else None
-        message = self._twist_type()
-        for _ in range(3):
-            self._publisher.publish(message)
+        zero_command_count = (
+            self._publish_zero_velocity()
+            if cancel_result is not None
+            else self._hold_zero_velocity(self.settings.post_cancel_settle_sec)
+        )
         cancellation_failed = cancel_result is not None and cancel_result.status != ToolStatus.CANCELED
         return ToolResult(
             status=ToolStatus.FAILED if cancellation_failed else ToolStatus.SUCCESS,
@@ -542,6 +633,7 @@ class RclpyRos2Adapter(Ros2Adapter):
                 "operation": "stop_robot",
                 "topic": self.settings.cmd_vel_topic,
                 "navigation_canceled": cancel_result is not None and not cancellation_failed,
+                "zero_command_count": zero_command_count,
             },
             error="Zero velocity was published but Nav2 cancellation was not confirmed" if cancellation_failed else None,
             retryable=cancellation_failed,
@@ -600,6 +692,31 @@ class RclpyRos2Adapter(Ros2Adapter):
         # Feedback is intentionally not sent to the LLM; it remains transport telemetry.
         _ = feedback
 
+    def _publish_zero_velocity(self, count: int = 3) -> int:
+        message = self._twist_type()
+        for _ in range(count):
+            self._publisher.publish(message)
+        return count
+
+    def _hold_zero_velocity(self, duration_sec: float) -> int:
+        """Publish stop commands throughout a bounded settling window."""
+        published = self._publish_zero_velocity()
+        if duration_sec <= 0:
+            return published
+        deadline = time.monotonic() + duration_sec
+        while time.monotonic() < deadline:
+            self._publisher.publish(self._twist_type())
+            published += 1
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._rclpy.spin_once(self._node, timeout_sec=0.0)
+                time.sleep(min(0.05, remaining))
+        return published
+
+    def _settle_after_navigation_cancel(self) -> int:
+        """Hold zero velocity while residual Nav2 controller output drains."""
+        return self._hold_zero_velocity(self.settings.post_cancel_settle_sec)
+
     def cancel_navigation(self) -> ToolResult:
         if self._active_goal_handle is None:
             return ToolResult(status=ToolStatus.SUCCESS, data={"operation": "cancel_navigation", "active_goal": False})
@@ -624,6 +741,9 @@ class RclpyRos2Adapter(Ros2Adapter):
             )
         self._active_goal_handle = None
         self._active_result_future = None
+        zero_command_count = (
+            self._settle_after_navigation_cancel() if terminal_canceled else 0
+        )
         return ToolResult(
             status=ToolStatus.CANCELED if terminal_canceled else ToolStatus.FAILED,
             data={
@@ -631,6 +751,12 @@ class RclpyRos2Adapter(Ros2Adapter):
                 "active_goal": True,
                 "cancel_accepted": cancel_accepted,
                 "terminal_canceled": terminal_canceled,
+                "post_cancel_settle_sec": (
+                    self.settings.post_cancel_settle_sec
+                    if terminal_canceled
+                    else 0.0
+                ),
+                "zero_command_count": zero_command_count,
             },
             error=(
                 None
@@ -683,25 +809,105 @@ class RclpyRos2Adapter(Ros2Adapter):
             desired_encoding="bgr8",
         )
 
-    def center_target_in_view(
+    def align_to_detection(
         self,
         on_tick: Callable[[], Detection | None],
         *,
         tick_interval_sec: float,
         horizontal_tolerance: float,
+        target_box_size: float,
+        box_size_tolerance: float,
         max_angular_speed: float,
-        gain: float,
+        min_angular_speed: float = 0.025,
+        angular_gain: float,
+        max_linear_speed: float,
+        min_linear_speed: float = 0.02,
+        linear_gain: float,
         timeout_sec: float,
+        stable_frames: int = 3,
+        detection_hold_sec: float = 1.0,
     ) -> ToolResult:
-        """Rotate in place until a confident detection reaches image center."""
+        """Rotate to center, then approach to the target bbox size."""
         started = time.monotonic()
         ticker = _DetectionTicker(tick_interval_sec)
+        phase = "rotate"
+        stable_count = 0
         last_detection: Detection | None = None
+        last_detection_at: float | None = None
+        last_errors: dict[str, Any] = {}
+        previous_diagnostic_pose: Pose2D | None = getattr(
+            self,
+            "_latest_pose",
+            None,
+        )
+        last_log_at = 0.0
+        last_log_state: str | None = None
 
-        def publish_stop() -> None:
-            stop = self._twist_type()
-            for _ in range(3):
-                self._publisher.publish(stop)
+        def publish_stop(*, hold: bool = False) -> None:
+            if hold:
+                settle_sec = getattr(
+                    getattr(self, "settings", None),
+                    "post_cancel_settle_sec",
+                    0.0,
+                )
+                self._hold_zero_velocity(settle_sec)
+            else:
+                self._publish_zero_velocity()
+
+        def bounded_velocity(
+            error: float,
+            gain: float,
+            minimum: float,
+            maximum: float,
+        ) -> float:
+            magnitude = min(maximum, max(minimum, gain * abs(error)))
+            return math.copysign(magnitude, error)
+
+        def log_tick(
+            *,
+            state: str,
+            linear_x: float,
+            angular_z: float,
+            force: bool = False,
+        ) -> None:
+            nonlocal previous_diagnostic_pose
+            nonlocal last_log_at
+            nonlocal last_log_state
+            now = time.monotonic()
+            if not force and state == last_log_state and now - last_log_at < 1.0:
+                return
+            pose = getattr(self, "_latest_pose", None)
+            pose_delta_m = None
+            pose_delta_yaw = None
+            if pose is not None and previous_diagnostic_pose is not None:
+                pose_delta_m = math.hypot(
+                    pose.x - previous_diagnostic_pose.x,
+                    pose.y - previous_diagnostic_pose.y,
+                )
+                pose_delta_yaw = math.atan2(
+                    math.sin(pose.yaw - previous_diagnostic_pose.yaw),
+                    math.cos(pose.yaw - previous_diagnostic_pose.yaw),
+                )
+            if pose is not None:
+                previous_diagnostic_pose = pose
+            get_logger = getattr(self._node, "get_logger", None)
+            if not callable(get_logger):
+                return
+            command_summary = (
+                "cmd=stop"
+                if linear_x == 0.0 and angular_z == 0.0
+                else f"v={linear_x:.3f} w={angular_z:.3f}"
+            )
+            motion_summary = ""
+            if pose_delta_m is not None and pose_delta_yaw is not None:
+                motion_summary = (
+                    f" moved={pose_delta_m:.4f}m turned={pose_delta_yaw:.4f}rad"
+                )
+            get_logger().info(
+                f"visual_alignment state={state} {command_summary}{motion_summary}"
+            )
+            last_log_at = now
+            last_log_state = state
 
         while time.monotonic() - started <= timeout_sec:
             self._rclpy.spin_once(self._node, timeout_sec=0.1)
@@ -709,73 +915,175 @@ class RclpyRos2Adapter(Ros2Adapter):
                 continue
             detection = on_tick()
             if detection is None:
+                stable_count = 0
+                within_hold = (
+                    last_detection is not None
+                    and last_detection_at is not None
+                    and time.monotonic() - last_detection_at <= detection_hold_sec
+                )
                 publish_stop()
+                log_tick(
+                    state="waiting" if within_hold else "lost",
+                    linear_x=0.0,
+                    angular_z=0.0,
+                )
                 continue
             last_detection = detection
+            last_detection_at = time.monotonic()
             image_position = detection.image_position
             if image_position is None:
-                publish_stop()
+                publish_stop(hold=True)
+                log_tick(
+                    state="invalid_bbox",
+                    linear_x=0.0,
+                    angular_z=0.0,
+                    force=True,
+                )
                 return ToolResult(
                     status=ToolStatus.FAILED,
                     data={
-                        "operation": "center_target_in_view",
+                        "operation": "align_to_detection",
                         "found": detection.to_dict(),
                     },
-                    error="Detection has no image position for visual centering",
+                    error="Detection has no image position for visual alignment",
+                    retryable=False,
+                )
+            if image_position.height_normalized <= 0:
+                publish_stop(hold=True)
+                log_tick(
+                    state="invalid_bbox",
+                    linear_x=0.0,
+                    angular_z=0.0,
+                    force=True,
+                )
+                return ToolResult(
+                    status=ToolStatus.FAILED,
+                    data={
+                        "operation": "align_to_detection",
+                        "found": detection.to_dict(),
+                    },
+                    error="Detection bounding box has no usable height",
                     retryable=False,
                 )
             horizontal_error = image_position.x_normalized - 0.5
-            if abs(horizontal_error) <= horizontal_tolerance:
+            vertical_error = image_position.y_normalized - 0.5
+            size_error = target_box_size - image_position.height_normalized
+            last_errors = {
+                "phase": phase,
+                "horizontal_error": horizontal_error,
+                "vertical_error": vertical_error,
+                "size_error": size_error,
+                "target_box_size": target_box_size,
+            }
+
+            if phase == "rotate":
+                if abs(horizontal_error) <= horizontal_tolerance:
+                    stable_count += 1
+                    publish_stop()
+                    if stable_count >= stable_frames:
+                        phase = "approach"
+                        stable_count = 0
+                        log_tick(
+                            state="rotation_complete",
+                            linear_x=0.0,
+                            angular_z=0.0,
+                            force=True,
+                        )
+                    else:
+                        log_tick(
+                            state=f"rotate_stable_{stable_count}/{stable_frames}",
+                            linear_x=0.0,
+                            angular_z=0.0,
+                        )
+                    continue
+                stable_count = 0
+                command = self._twist_type()
+                command.angular.z = bounded_velocity(
+                    -horizontal_error,
+                    angular_gain,
+                    min_angular_speed,
+                    max_angular_speed,
+                )
+                self._publisher.publish(command)
+                log_tick(
+                    state="rotate",
+                    linear_x=command.linear.x,
+                    angular_z=command.angular.z,
+                )
+                continue
+
+            # Approach is translation-only. If the target drifts, stop and
+            # reacquire heading before allowing any more linear motion.
+            if abs(horizontal_error) > horizontal_tolerance * 1.5:
+                phase = "rotate"
+                stable_count = 0
                 publish_stop()
+                log_tick(
+                    state="recenter",
+                    linear_x=0.0,
+                    angular_z=0.0,
+                    force=True,
+                )
+                continue
+            if abs(size_error) <= box_size_tolerance:
+                stable_count += 1
+                publish_stop()
+                if stable_count < stable_frames:
+                    log_tick(
+                        state=f"approach_stable_{stable_count}/{stable_frames}",
+                        linear_x=0.0,
+                        angular_z=0.0,
+                    )
+                    continue
+                publish_stop(hold=True)
+                log_tick(
+                    state="aligned",
+                    linear_x=0.0,
+                    angular_z=0.0,
+                    force=True,
+                )
                 return ToolResult(
                     status=ToolStatus.SUCCESS,
                     data={
-                        "operation": "center_target_in_view",
+                        "operation": "align_to_detection",
                         "found": detection.to_dict(),
                         "centered": True,
+                        "phase": "complete",
+                        "stable_frames": stable_frames,
                         "horizontal_error": horizontal_error,
+                        "vertical_error": vertical_error,
+                        "size_error": size_error,
+                        "target_box_size": target_box_size,
                     },
                     duration_sec=time.monotonic() - started,
                 )
+            stable_count = 0
             command = self._twist_type()
-            command.angular.z = max(
-                -max_angular_speed,
-                min(max_angular_speed, -gain * horizontal_error),
+            command.linear.x = bounded_velocity(
+                size_error,
+                linear_gain,
+                min_linear_speed,
+                max_linear_speed,
             )
             self._publisher.publish(command)
+            log_tick(
+                state="approach",
+                linear_x=command.linear.x,
+                angular_z=command.angular.z,
+            )
 
-        publish_stop()
+        publish_stop(hold=True)
         return ToolResult(
             status=ToolStatus.TIMEOUT,
             data={
-                "operation": "center_target_in_view",
+                "operation": "align_to_detection",
                 "found": last_detection.to_dict() if last_detection else None,
                 "centered": False,
+                **last_errors,
             },
-            error="Target was not centered before the visual-centering timeout",
+            error="Target was not aligned before the visual-alignment timeout",
             duration_sec=time.monotonic() - started,
             retryable=True,
-        )
-
-    def adjust_for_perception(self, linear_x: float, duration_sec: float) -> ToolResult:
-        started = time.monotonic()
-        message = self._twist_type()
-        message.linear.x = linear_x
-        while time.monotonic() - started < duration_sec:
-            self._publisher.publish(message)
-            self._rclpy.spin_once(self._node, timeout_sec=0.0)
-            time.sleep(0.1)
-        stop = self._twist_type()
-        for _ in range(3):
-            self._publisher.publish(stop)
-        return ToolResult(
-            status=ToolStatus.SUCCESS,
-            data={
-                "operation": "adjust_for_perception",
-                "linear_x": linear_x,
-                "duration_sec": duration_sec,
-            },
-            duration_sec=time.monotonic() - started,
         )
 
     def close(self) -> None:

@@ -46,6 +46,8 @@ def detect_colored_blobs(image: Any, color: str) -> list[Detection]:
                 y_px=float(point.pt[1]),
                 x_normalized=float(point.pt[0]) / float(width),
                 y_normalized=float(point.pt[1]) / float(height),
+                width_normalized=float(point.size) / float(width),
+                height_normalized=float(point.size) / float(height),
             ),
         )
         for point in keypoints

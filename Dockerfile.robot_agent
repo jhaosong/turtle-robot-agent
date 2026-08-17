@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY src/robot_agent/requirements.txt /tmp/robot-agent-requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     python -m pip install --no-cache-dir -r /tmp/robot-agent-requirements.txt

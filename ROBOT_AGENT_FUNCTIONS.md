@@ -75,13 +75,14 @@ All tools below are created in `src/robot_agent/tools/registry.py` by
 
 | Name | Input | Description |
 |---|---|---|
-| `TaskPlan.validate_requirements` | Current `TaskPlan` instance | Require `requires_perception=true` whenever requested colors are present. |
+| `TaskPlan.validate_requirements` | Current `TaskPlan` instance | Require `requires_perception=true` whenever requested colors or semantic labels are present. |
 | `LeadTaskPlanner.__init__` | `model: Any` | Store the replaceable planner model. |
 | `LeadTaskPlanner.plan` | `goal`, `robot_state`, `available_capabilities`, optional `known_locations` | Ask the model for a structured high-level plan and reject unavailable capabilities. |
 
 Planner output contains `objective`, `assumptions`, up to eight `steps`,
-`requires_perception`, and `requested_colors`. Each step contains a description
-and one of `navigation`, `perception`, `behavior_tree`, or `control`.
+`requires_perception`, `requested_colors`, and `requested_labels`. Each step
+contains a description and one of `navigation`, `perception`, `behavior_tree`,
+or `control`.
 
 ### `src/robot_agent/agents/lead_agent/prompt.py`
 
@@ -112,14 +113,15 @@ These Pydantic schemas validate model-generated tool arguments before execution.
 | Name | Input | Description |
 |---|---|---|
 | `load_locations` | `path: Path` | Parse `{name: [x, y, yaw]}` YAML into `Pose2D` objects. |
-| `RobotToolRegistry.__init__` | `runtime`, `ros`, `bt_skill`, optional `detector` | Assemble locations, world model, safety validator, detector, and loop detector for one run. |
+| `RobotToolRegistry.__init__` | `runtime`, `ros`, `bt_skill`, optional `detector` | Assemble locations, world model, safety validator, optional detector, and loop detector for one run. |
+| `_get_detector` | None | Lazily load the configured detector only when a perception tool needs it. |
 | `_execute` | `tool_name`, `arguments`, `operation` | Enforce no-progress and loop limits, normalize exceptions/results, trace, and persist one tool call. |
 | `_record` | `tool_name`, `arguments`, `operation` | Execute a tool and convert its `ToolResult` to a dictionary. |
 | `_navigate_to_pose` | `pose: Pose2D`, optional `location` | Validate and execute navigation, then verify and store the actual final pose and error. |
 | `_navigate_to_location` | `location: str` | Resolve a named location and delegate to `_navigate_to_pose`. |
 | `_move_relative` | `distance_m: float` | Compute a map target from live pose and heading, then navigate to it. |
-| `_search_for_object` | `route`, optional `color`, optional `label` | Coordinate watched Nav2 movement, confidence filtering, cancellation, centering, and detection reporting. |
-| `_search_for_object.detect_latest` | None; closes over `color`, `label`, and frame count | Read one camera frame, run the configured detector, apply the confidence threshold, and return the strongest match. |
+| `_search_for_object` | `route`, optional `color`, optional `label` | Coordinate watched Nav2 movement, confidence filtering, cancellation, bbox-driven alignment, and detection reporting. |
+| `_search_for_object.detect_latest` | None; closes over query and tracking state | Acquire with the stop threshold, then track the nearest spatially consistent bbox with a lower confidence threshold during visual alignment. |
 | `_wait_for` | `seconds: float` | Validate and execute a wait, or return `planned` in dry-run mode. |
 | `build` | None | Return the 12 `StructuredTool` objects listed at the top of this document. |
 
@@ -151,8 +153,8 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `Ros2Adapter.cancel_navigation` | None | Abstract active-goal cancellation operation. |
 | `Ros2Adapter.detect_color` | `color: str` | Abstract one-frame color detection operation. |
 | `Ros2Adapter.get_camera_frame` | None | Return the latest BGR frame when supported. |
-| `Ros2Adapter.center_target_in_view` | detection callback plus interval, tolerance, speed, gain, timeout | Rotate until a detection reaches horizontal image center; base implementation reports unsupported. |
-| `Ros2Adapter.adjust_for_perception` | `linear_x`, `duration_sec` | Small bounded motion for a perception retry; base implementation reports unsupported. |
+| `Ros2Adapter.update_detection_overlay` | `detections` | Update boxes shown on the annotated camera stream; base implementation is a no-op. |
+| `Ros2Adapter.align_to_detection` | detection callback plus horizontal/box-size targets, speed bounds, gains, stability count, timeout | Base contract for staged bbox centering followed by visual distance regulation. |
 | `Ros2Adapter.close` | None | Release backend resources. |
 
 #### `Ros2CliAdapter`
@@ -162,12 +164,11 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `__init__` | `settings` | Configure transparent ROS2 CLI transport. |
 | `_run` | `command: str`, `details: dict` | Return a planned command in dry-run mode or execute it with timeout and captured output. |
 | `navigate_to_pose` | `pose: Pose2D` | Generate/execute `ros2 action send_goal` for Nav2. |
-| `navigate_to_pose_with_watch` | `pose`, `on_tick`, `tick_interval_sec` | Delegate to plain navigation because CLI cannot cooperatively process camera frames. |
+| `navigate_to_pose_with_watch` | `pose`, `on_tick`, `tick_interval_sec` | Fail explicitly because CLI cannot safely interleave navigation and camera processing. |
 | `stop_robot` | None | Publish three zero `Twist` messages; does not own/cancel an unknown Nav2 goal. |
 | `get_pose` | None | Read one odometry message and convert it to `Pose2D`. |
 | `cancel_navigation` | None | Return unsupported because CLI does not retain a goal handle. |
 | `detect_color` | `color: str` | Report that image interpretation requires the rclpy backend. |
-| `adjust_for_perception` | `linear_x`, `duration_sec` | Generate/execute bounded velocity followed by zero velocity. |
 
 #### `RclpyRos2Adapter`
 
@@ -176,17 +177,20 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `__init__` | `settings` | Create the rclpy node, Nav2 action client, TF buffer, subscribers, and velocity publisher. |
 | `_on_odom` | ROS `Odometry` message | Cache the latest odometry pose. |
 | `_on_image` | ROS `Image` message | Cache the latest camera image message. |
+| `update_detection_overlay` | `detections` | Cache the latest search detections for short-lived visualization. |
+| `_publish_annotated_image` | ROS `Image` message | Draw cached normalized boxes, labels, and confidence on a BGR frame and publish it with the source header. |
 | `navigate_to_pose` | `pose: Pose2D` | Send a Nav2 action goal and wait for its terminal result. |
 | `navigate_to_pose_with_watch` | `pose`, detection callback, interval | Run Nav2 while periodically detecting; cancel the action when a target is found. |
 | `stop_robot` | None | Cancel this adapter's active goal, then publish zero velocity three times. |
 | `get_pose` | None | Read the live `map -> base_link` TF and return a map-frame `Pose2D`. |
 | `_on_navigation_feedback` | Nav2 feedback | Consume transport telemetry without sending raw feedback to the LLM. |
+| `_publish_zero_velocity` | optional message count | Publish explicit zero `Twist` commands through the shared velocity publisher. |
+| `_settle_after_navigation_cancel` | None | Hold zero velocity for the configured post-cancel handoff window so residual Nav2 output drains before visual control. |
 | `cancel_navigation` | None | Cancel the retained Nav2 goal and verify terminal canceled status. |
 | `detect_color` | `color: str` | Convert the latest ROS image to BGR and run HSV blob detection. |
 | `get_camera_frame` | None | Convert and return the latest ROS image as a BGR array. |
-| `center_target_in_view` | detection callback plus interval, tolerance, speed, gain, timeout | Apply bounded angular velocity until target `x_normalized` is centered, then stop. |
-| `center_target_in_view.publish_stop` | None; nested helper | Publish three zero `Twist` messages whenever centering stops, succeeds, fails, or times out. |
-| `adjust_for_perception` | `linear_x`, `duration_sec` | Publish bounded linear motion, then publish zero velocity. |
+| `align_to_detection` | detection callback plus horizontal/box-size targets, linear/angular bounds and gains, stability count, timeout | First rotate with zero linear velocity until horizontal alignment is stable, then translate with zero angular velocity until bbox height is stable; drift returns to rotation. |
+| `align_to_detection.publish_stop` | None; nested helper | Publish three zero `Twist` messages whenever alignment stops, succeeds, fails, or times out. |
 | `close` | None | Destroy the node and shut down an owned rclpy context. |
 | `build_ros2_adapter` | `settings`, `backend="cli"` | Construct either `Ros2CliAdapter` or `RclpyRos2Adapter`. |
 
@@ -196,7 +200,7 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 
 | Name | Input | Description |
 |---|---|---|
-| `detect_colored_blobs` | BGR `image`, `color: str` | Detect red, green, or blue HSV blobs and return confidence plus image-plane centers. |
+| `detect_colored_blobs` | BGR `image`, `color: str` | Detect red, green, or blue HSV blobs and return confidence plus normalized image-plane boxes. |
 
 ### `src/robot_agent/perception/detector.py`
 
@@ -208,10 +212,13 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `ColorBlobDetector.detect` | BGR `image`, `color`, optional `label` | Delegate to HSV blob detection. |
 | `YoloDetector.__init__` | `model_name="yolov8n.pt"`, `input_size=640` | Load an optional Ultralytics YOLO model. |
 | `YoloDetector.validate_query` | optional `color`, required `label` | Require a class label and reject color filtering. |
-| `YoloDetector.detect` | BGR `image`, required `label` | Run YOLO, filter exact class names, and return confidence and box-center image positions. |
+| `YoloDetector.detect` | BGR `image`, required `label` | Run closed-set YOLO and return confidence plus normalized bounding boxes. |
+| `YoloeDetector.__init__` | `model_name="yoloe-26s-seg.pt"`, `input_size=640` | Load pinned Ultralytics YOLOE-26 for open-vocabulary detection. |
+| `YoloeDetector.validate_query` | optional `color`, required `label` | Require a concrete text-prompt label. |
+| `YoloeDetector.detect` | BGR `image`, required `label` | Set the text vocabulary, run YOLOE, and return normalized bounding boxes. |
 | `VlmDetector.validate_query` | optional `color`, optional `label` | Placeholder that currently raises `NotImplementedError`. |
 | `VlmDetector.detect` | BGR `image`, optional `color`, optional `label` | Placeholder that currently raises `NotImplementedError`. |
-| `build_detector` | `backend`, optional YOLO model and input size | Build `color_blob` or `yolo`; reject the currently unimplemented `vlm` backend. |
+| `build_detector` | `backend`, optional YOLO/YOLOE models and input size | Build `color_blob`, `yolo`, or default `yoloe`; reject the unimplemented `vlm` backend. |
 
 ## Behavior-tree skill
 
@@ -227,6 +234,13 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `BehaviorTreeSkill.run` | `goal` plus `navigate`, `stop`, `wait`, `abort`, optional node callback | Generate once and execute validated `GoToPose`, `Wait`, and `Stop` nodes in sequence with bounded retries. |
 
 ## Runtime, persistence, and events
+
+### `src/robot_agent/runtime/rviz_config.py`
+
+| Name | Input | Description |
+|---|---|---|
+| `configure_rviz` | Parsed TurtleBot RViz config | Retain map/navigation displays, remove old auxiliary docks, and add raw plus YOLOE camera displays. |
+| `write_robot_agent_config` | Source and destination paths | Materialize the focused RViz YAML used at GUI startup. |
 
 ### `src/robot_agent/runtime/runtime.py`
 
@@ -329,9 +343,11 @@ updates the checkpoint, `navigate` executes `GoToPose`, `wait` executes `Wait`,
 | `ToolResult.to_dict` | Current result | Serialize a normalized tool result and enum status. |
 | `GoalEvaluation.to_dict` | Current evaluation | Serialize the deterministic goal verdict. |
 | `Pose2D.to_dict` | Current pose | Serialize `x`, `y`, `yaw`, and `frame_id`. |
-| `ImagePosition.to_dict` | Current image position | Serialize pixel and normalized coordinates. |
+| `ImagePosition.to_dict` | Current image position | Serialize bbox center pixels plus normalized center, width, and height. |
 | `Detection.to_dict` | Current detection | Serialize label, confidence, color, optional world pose, and image position. |
 | `Detection.from_snapshot` | detection dictionary | Restore a `Detection` from persisted data. |
+| `matching_goal_detections` | `goal_requirements`, `visible_objects` | Return detections matching every requested color and semantic label; either filter may be omitted. |
+| `goal_requirements_satisfied` | `goal_requirements`, `visible_objects` | Provide the shared deterministic perception-goal verdict used by runtime plan updates and the goal monitor. |
 | `RobotState.to_agent_context` | Current robot state | Return compact semantic state without raw ROS messages. |
 | `RobotState.from_snapshot` | robot-state dictionary | Restore semantic robot state. |
 | `SemanticSessionState.to_snapshot` | Current session state | Serialize robot facts and visited locations for cross-run persistence. |

@@ -4,10 +4,13 @@ langchain-openai>=1.0
 pydantic>=2
 PyYAML>=6
 python-dotenv>=1
+# ROS Humble's Ubuntu matplotlib/OpenCV wheels use the NumPy 1.x ABI.
+numpy==1.26.4
+ultralytics==8.4.67
+clip @ git+https://github.com/ultralytics/CLIP.git@488e81a6711eea7346872b46ea928b367da8889d
 
-# Optional camera perception dependency:
+# Additional optional provider dependencies:
 # opencv-python>=4.8
-# ultralytics>=8.0  # only for ROBOT_AGENT_DETECTOR_BACKEND=yolo
 # langchain-anthropic>=1.0  # only for LLM_PROVIDER=anthropic
 # langchain-ollama>=1.0  # only for LLM_PROVIDER=ollama
 #

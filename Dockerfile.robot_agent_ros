@@ -1,3 +1,24 @@
+ARG ROS_DISTRO=humble
+
+# Keep the expensive Python dependency layer independent from the Gazebo
+# overlay. Rebuilding a world or RViz package must not reinstall YOLOE/Torch.
+FROM osrf/ros:${ROS_DISTRO}-desktop AS robot_agent_dependencies
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/robot_agent/requirements.txt /tmp/robot-agent-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m venv --system-site-packages /opt/robot-agent-venv && \
+    /opt/robot-agent-venv/bin/python -m pip install --upgrade pip setuptools wheel && \
+    /opt/robot-agent-venv/bin/python -m pip install -r /tmp/robot-agent-requirements.txt
+
+
 FROM turtlebot3_behavior:overlay
 
 USER root
@@ -8,14 +29,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/robot-agent-venv/bin:${PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-venv \
         xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-COPY src/robot_agent/requirements.txt /tmp/robot-agent-requirements.txt
-RUN python3 -m venv --system-site-packages /opt/robot-agent-venv && \
-    /opt/robot-agent-venv/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    /opt/robot-agent-venv/bin/python -m pip install --no-cache-dir -r /tmp/robot-agent-requirements.txt
+COPY --link --from=robot_agent_dependencies /opt/robot-agent-venv /opt/robot-agent-venv
 
 # Symlink-install points ROS executables back into these source directories;
 # archive transfers from macOS may not preserve their executable bits.

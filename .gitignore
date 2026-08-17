@@ -1,10 +1,11 @@
 .idea
 .vscode
-src/*.egg-info/
+*.egg-info/
 build/
 dist/
 __pycache__/
 *.py[cod]
+.venv*/
 docs
 .DS_Store
 
@@ -17,5 +18,7 @@ robot_agent_runs/
 .pytest_cache/
 *.log
 *.zip
+*.pt
+mobileclip*.ts
 .Rhistory
 .colcon/

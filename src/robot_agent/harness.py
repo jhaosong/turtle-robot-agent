@@ -15,6 +15,7 @@ from robot_agent.models import load_chat_model
 from robot_agent.middlewares import ModelTerminationMiddleware, PlanCompletionMiddleware
 from robot_agent.ros import build_ros2_adapter
 from robot_agent.runtime import RobotAgentRuntime
+from robot_agent.runtime.serialization import sanitize_text
 from robot_agent.skills import BehaviorTreeSkill
 from robot_agent.state import GoalBlocker, ToolStatus
 from robot_agent.tools.registry import RobotToolRegistry, load_locations
@@ -105,6 +106,9 @@ class RoboticsAgentHarness:
         self.model = model
 
     def invoke(self, goal: str) -> dict[str, Any]:
+        # Some remote terminals can decode malformed input as lone surrogates,
+        # which are invalid in UTF-8 and unsafe to send to model providers.
+        goal = sanitize_text(goal)
         runtime = RobotAgentRuntime(self.settings, goal)
         locations = load_locations(self.settings.location_file)
         model = self.model or load_chat_model(streaming=False)
@@ -130,6 +134,7 @@ class RoboticsAgentHarness:
             runtime.state.goal_requirements = {
                 "requires_perception": task_plan.requires_perception,
                 "requested_colors": task_plan.requested_colors,
+                "requested_labels": task_plan.requested_labels,
             }
             runtime.emit("task_planned", task_plan.model_dump())
         except Exception as exc:
