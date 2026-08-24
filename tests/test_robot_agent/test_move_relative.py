@@ -31,9 +31,6 @@ class RelativeMotionAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class MoveRelativeTest(unittest.TestCase):
     def test_uses_live_pose_and_heading_to_compute_map_target(self):
@@ -45,7 +42,6 @@ class MoveRelativeTest(unittest.TestCase):
                 RobotAgentSettings(
                     location_file=location_file,
                     run_directory=root / "runs",
-                    execute_ros2=True,
                     trace=False,
                     max_no_progress_continuations=5,
                 ),

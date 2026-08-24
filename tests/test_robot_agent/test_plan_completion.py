@@ -55,12 +55,6 @@ class PlanTestRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(
-            status=ToolStatus.SUCCESS,
-            data={"detections": [{"label": "colored_object", "color": color, "confidence": 0.9}]},
-        )
-
 
 class PlanCompletionTest(unittest.TestCase):
     def test_label_requirement_controls_perception_plan_completion(self):
@@ -135,13 +129,6 @@ class PlanCompletionTest(unittest.TestCase):
                 }
             ]
 
-            runtime.record_tool_result(
-                "inspect_for_color",
-                {"color": "green"},
-                ToolResult(status=ToolStatus.SUCCESS, data={"matches": []}),
-            )
-            self.assertEqual(runtime.state.plan[0]["status"], "pending")
-
             runtime.state.robot_state.visible_objects = [
                 Detection("colored_object", 0.9, color="green")
             ]
@@ -152,32 +139,6 @@ class PlanCompletionTest(unittest.TestCase):
             )
             self.assertEqual(runtime.state.plan[0]["status"], "completed")
 
-    def test_planned_external_action_does_not_force_continuation(self):
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            location_file = root / "locations.yaml"
-            location_file.write_text("location1: [1.0, 2.0, 0.0]\n", encoding="utf-8")
-            runtime = RobotAgentRuntime(
-                RobotAgentSettings(
-                    location_file=location_file,
-                    run_directory=root / "runs",
-                    trace=False,
-                    max_no_progress_continuations=5,
-                ),
-                "navigate to location1",
-            )
-            runtime.state.plan = [
-                {"description": "navigate", "preferred_capability": "navigation", "status": "pending"}
-            ]
-            runtime.record_tool_result("navigate_to", {}, ToolResult(status=ToolStatus.PLANNED))
-
-            update = PlanCompletionMiddleware(runtime).after_model(
-                {"messages": [AIMessage(content="Navigation command was planned.")]},
-                runtime=None,
-            )
-
-            self.assertIsNone(update)
-
     def test_two_reminders_then_returns_clean_terminal_response(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -186,7 +147,6 @@ class PlanCompletionTest(unittest.TestCase):
             settings = RobotAgentSettings(
                 location_file=location_file,
                 run_directory=root / "runs",
-                execute_ros2=True,
                 trace=False,
                 max_no_progress_continuations=6,
             )
@@ -217,7 +177,7 @@ class PlanCompletionTest(unittest.TestCase):
                 ],
             )
             with (
-                patch.object(harness_module, "build_ros2_adapter", lambda settings, backend: PlanTestRosAdapter()),
+                patch.object(harness_module, "RclpyRos2Adapter", lambda settings: PlanTestRosAdapter()),
                 patch.object(
                     harness_module.LeadTaskPlanner,
                     "plan",
@@ -239,7 +199,6 @@ class PlanCompletionTest(unittest.TestCase):
             settings = RobotAgentSettings(
                 location_file=location_file,
                 run_directory=root / "runs",
-                execute_ros2=True,
                 trace=False,
                 max_no_progress_continuations=6,
             )
@@ -248,32 +207,27 @@ class PlanCompletionTest(unittest.TestCase):
                     AIMessage(content="", tool_calls=[{"name": "navigate_to", "args": {"location": "kitchen"}, "id": "nav", "type": "tool_call"}]),
                     AIMessage(content="premature final"),
                     AIMessage(content="", tool_calls=[{"name": "stop_robot", "args": {}, "id": "stop", "type": "tool_call"}]),
-                    AIMessage(content="still premature"),
-                    AIMessage(content="", tool_calls=[{"name": "inspect_for_color", "args": {"color": "blue"}, "id": "inspect", "type": "tool_call"}]),
                     AIMessage(content="all steps complete"),
                 ]
             )
             task_plan = TaskPlan(
-                objective="navigate, stop, inspect",
-                requires_perception=True,
-                requested_colors=["blue"],
+                objective="navigate and stop",
                 steps=[
                     PlannedStep(description="navigate to kitchen", preferred_capability="navigation"),
                     PlannedStep(description="stop safely", preferred_capability="control"),
-                    PlannedStep(description="inspect blue target", preferred_capability="perception"),
                 ],
             )
             with (
-                patch.object(harness_module, "build_ros2_adapter", lambda settings, backend: PlanTestRosAdapter()),
+                patch.object(harness_module, "RclpyRos2Adapter", lambda settings: PlanTestRosAdapter()),
                 patch.object(
                     harness_module.LeadTaskPlanner,
                     "plan",
                     lambda self, goal, robot_state, available_capabilities, known_locations=None: task_plan,
                 ),
             ):
-                result = harness_module.RoboticsAgentHarness(settings, model=model).invoke("run all three steps")
+                result = harness_module.RoboticsAgentHarness(settings, model=model).invoke("navigate and stop")
 
-            self.assertEqual(model._index, 6)
+            self.assertEqual(model._index, 4)
             self.assertEqual(result["run_status"], "succeeded")
             self.assertTrue(all(step["status"] == "completed" for step in result["agent_state"]["plan"]))
 

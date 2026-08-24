@@ -29,9 +29,6 @@ class FakeRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class SessionStateTest(unittest.TestCase):
     def test_semantic_state_survives_two_harness_invocations(self):
@@ -42,7 +39,6 @@ class SessionStateTest(unittest.TestCase):
             settings = RobotAgentSettings(
                 location_file=location_file,
                 run_directory=root / "runs",
-                execute_ros2=True,
                 trace=False,
             )
             invocation_count = 0
@@ -56,7 +52,6 @@ class SessionStateTest(unittest.TestCase):
                     invocation_count += 1
                     if invocation_count == 1:
                         self.tools["navigate_to"].invoke({"location": "kitchen"})
-                        self.tools["inspect_for_color"].invoke({"color": "blue"})
                     return {"messages": [AIMessage(content="ok")]}
 
             def fake_make_lead_agent(**kwargs):
@@ -68,7 +63,7 @@ class SessionStateTest(unittest.TestCase):
                 )
 
             with (
-                patch.object(harness_module, "build_ros2_adapter", lambda settings, backend: FakeRosAdapter()),
+                patch.object(harness_module, "RclpyRos2Adapter", lambda settings: FakeRosAdapter()),
                 patch.object(harness_module, "make_lead_agent", fake_make_lead_agent),
                 patch.object(
                     harness_module.LeadTaskPlanner,
@@ -87,7 +82,6 @@ class SessionStateTest(unittest.TestCase):
             self.assertEqual(first["agent_state"]["robot_state"]["pose"], expected_pose)
             self.assertEqual(second["agent_state"]["robot_state"]["pose"], expected_pose)
             self.assertEqual(second["agent_state"]["robot_state"]["navigation_status"], "succeeded")
-            self.assertIsNotNone(second["agent_state"]["robot_state"]["last_perception_at"])
             self.assertEqual(second["agent_state"]["visited_locations"], ["kitchen"])
             self.assertTrue((settings.run_directory / "sessions" / "default.json").exists())
 

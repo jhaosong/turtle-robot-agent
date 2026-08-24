@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from robot_agent.config import RobotAgentSettings
-from robot_agent.ros import Ros2Adapter, build_ros2_adapter
+from robot_agent.ros import Ros2Adapter
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.skills import BehaviorTreeSkill
 from robot_agent.state import Pose2D, RunState, ToolResult, ToolStatus
@@ -26,9 +26,6 @@ class SuccessfulRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class SessionPersistenceTest(unittest.TestCase):
     def test_semantic_snapshot_does_not_alias_live_robot_state(self):
@@ -40,13 +37,12 @@ class SessionPersistenceTest(unittest.TestCase):
 
         self.assertEqual(snapshot.robot_state.pose.x, 1.0)
 
-    def _settings(self, root: Path, *, execute_ros2: bool) -> RobotAgentSettings:
+    def _settings(self, root: Path) -> RobotAgentSettings:
         location_file = root / "locations.yaml"
         location_file.write_text("kitchen: [1.5, -0.5, 0.25]\n", encoding="utf-8")
         return RobotAgentSettings(
             location_file=location_file,
             run_directory=root / "runs",
-            execute_ros2=execute_ros2,
             trace=False,
             max_no_progress_continuations=5,
         )
@@ -67,27 +63,14 @@ class SessionPersistenceTest(unittest.TestCase):
         runtime.finish("succeeded")
         return RobotAgentRuntime(settings, "now find something")
 
-    def test_dry_run_persists_planned_pose_without_claiming_arrival(self):
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            settings = self._settings(root, execute_ros2=False)
-            restarted = self._navigate_and_restart(settings, build_ros2_adapter(settings),)
-
-            expected = {"x": 1.5, "y": -0.5, "yaw": 0.25, "frame_id": "map"}
-            self.assertEqual(restarted.state.robot_state.navigation_status, "planned")
-            self.assertEqual(restarted.state.robot_state.last_planned_pose.to_dict(), expected)
-            self.assertIsNone(restarted.state.robot_state.pose)
-            self.assertEqual(restarted.state.visited_locations, [])
-
     def test_successful_navigation_persists_confirmed_pose_and_visit(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            settings = self._settings(root, execute_ros2=True)
+            settings = self._settings(root)
             restarted = self._navigate_and_restart(settings, SuccessfulRosAdapter())
 
             expected = {"x": 1.5, "y": -0.5, "yaw": 0.25, "frame_id": "map"}
             self.assertEqual(restarted.state.robot_state.navigation_status, "succeeded")
-            self.assertIsNone(restarted.state.robot_state.last_planned_pose)
             self.assertEqual(restarted.state.robot_state.pose.to_dict(), expected)
             self.assertEqual(restarted.state.visited_locations, ["kitchen"])
 

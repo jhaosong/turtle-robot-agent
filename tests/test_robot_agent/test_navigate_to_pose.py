@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from robot_agent.config import RobotAgentSettings
-from robot_agent.ros import Ros2Adapter, build_ros2_adapter
+from robot_agent.ros import Ros2Adapter
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.state import Pose2D, ToolResult, ToolStatus
 from robot_agent.tools.registry import RobotToolRegistry
@@ -30,18 +30,14 @@ class SuccessfulPoseAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class NavigateToPoseTest(unittest.TestCase):
-    def _runtime(self, root: Path, *, execute_ros2: bool) -> RobotAgentRuntime:
+    def _runtime(self, root: Path) -> RobotAgentRuntime:
         location_file = root / "locations.yaml"
         location_file.write_text("location1: [0.0, 0.0, 0.0]\n", encoding="utf-8")
         settings = RobotAgentSettings(
             location_file=location_file,
             run_directory=root / "runs",
-            execute_ros2=execute_ros2,
             trace=False,
             max_no_progress_continuations=5,
         )
@@ -54,7 +50,7 @@ class NavigateToPoseTest(unittest.TestCase):
 
     def test_success_updates_confirmed_pose_without_named_visit(self):
         with TemporaryDirectory() as temporary_directory:
-            runtime = self._runtime(Path(temporary_directory), execute_ros2=True)
+            runtime = self._runtime(Path(temporary_directory))
             result = self._tool(runtime, SuccessfulPoseAdapter()).invoke(
                 {"x": 5.0, "y": 3.0, "yaw": 1.57}
             )
@@ -74,7 +70,7 @@ class NavigateToPoseTest(unittest.TestCase):
                 return ToolResult(status=ToolStatus.FAILED, error="TF unavailable")
 
         with TemporaryDirectory() as temporary_directory:
-            runtime = self._runtime(Path(temporary_directory), execute_ros2=True)
+            runtime = self._runtime(Path(temporary_directory))
             result = self._tool(runtime, UnobservablePoseAdapter()).invoke(
                 {"x": 5.0, "y": 3.0}
             )
@@ -83,20 +79,9 @@ class NavigateToPoseTest(unittest.TestCase):
             self.assertEqual(runtime.state.robot_state.navigation_status, "needs_verification")
             self.assertIsNone(runtime.state.robot_state.pose)
 
-    def test_dry_run_records_planned_pose_only(self):
-        with TemporaryDirectory() as temporary_directory:
-            runtime = self._runtime(Path(temporary_directory), execute_ros2=False)
-            result = self._tool(runtime, build_ros2_adapter(runtime.settings)).invoke(
-                {"x": 2.0, "y": -1.0}
-            )
-
-            self.assertEqual(result["status"], ToolStatus.PLANNED.value)
-            self.assertIsNone(runtime.state.robot_state.pose)
-            self.assertEqual(runtime.state.robot_state.last_planned_pose.x, 2.0)
-
     def test_workspace_guard_rejects_out_of_bounds_coordinate(self):
         with TemporaryDirectory() as temporary_directory:
-            runtime = self._runtime(Path(temporary_directory), execute_ros2=True)
+            runtime = self._runtime(Path(temporary_directory))
             result = self._tool(runtime, SuccessfulPoseAdapter()).invoke(
                 {"x": 50.0, "y": 3.0}
             )

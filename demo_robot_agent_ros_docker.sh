@@ -49,8 +49,6 @@ docker_args=(
     --volume "${ROOT_DIR}:/app"
     --workdir /app
     --env PYTHONPATH=/app/src
-    --env ROBOT_AGENT_EXECUTE_ROS2=true
-    --env ROBOT_AGENT_ROS_BACKEND=rclpy
     --env ROBOT_AGENT_TOOL_TIMEOUT_SEC="${ROBOT_AGENT_TOOL_TIMEOUT_SEC:-120}"
 )
 
@@ -84,7 +82,13 @@ fi
 # Forward explicitly supplied perception tuning without overriding .env when
 # the caller did not set a value in this shell.
 for variable_name in \
-    ROBOT_AGENT_DETECTOR_BACKEND \
+    ROBOT_AGENT_SCENE \
+    ROBOT_AGENT_INITIAL_X \
+    ROBOT_AGENT_INITIAL_Y \
+    ROBOT_AGENT_INITIAL_YAW \
+    ROBOT_AGENT_OBJECT_X \
+    ROBOT_AGENT_OBJECT_Y \
+    ROBOT_AGENT_OBJECT_YAW \
     ROBOT_AGENT_ANNOTATED_CAMERA_TOPIC \
     ROBOT_AGENT_DETECTION_INTERVAL_SEC \
     ROBOT_AGENT_DETECTION_BOX_THRESHOLD \
@@ -106,9 +110,11 @@ for variable_name in \
     ROBOT_AGENT_CENTERING_TIMEOUT_SEC \
     ROBOT_AGENT_CENTERING_DETECTION_HOLD_SEC \
     ROBOT_AGENT_POST_CANCEL_SETTLE_SEC \
-    ROBOT_AGENT_YOLO_MODEL \
     ROBOT_AGENT_YOLOE_MODEL \
-    ROBOT_AGENT_YOLO_INPUT_SIZE; do
+    ROBOT_AGENT_YOLO_INPUT_SIZE \
+    ROBOT_AGENT_CAMERA_HORIZONTAL_FOV_RAD \
+    ROBOT_AGENT_BASELINE_ASSUMED_OBJECT_DISTANCE_M \
+    ROBOT_AGENT_INSPECTION_RADIUS_M; do
     if [[ -n "${!variable_name:-}" ]]; then
         docker_args+=(--env "${variable_name}=${!variable_name}")
     fi

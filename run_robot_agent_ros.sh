@@ -1,10 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export ROBOT_AGENT_EXECUTE_ROS2=true
-export ROBOT_AGENT_ROS_BACKEND=rclpy
 export ROBOT_AGENT_TOOL_TIMEOUT_SEC="${ROBOT_AGENT_TOOL_TIMEOUT_SEC:-120}"
-export ROBOT_AGENT_LOCATION_FILE="${ROBOT_AGENT_LOCATION_FILE:-/app/turtlebot3_behavior_demos/tb3_worlds/maps/sim_house_locations.yaml}"
+export ROBOT_AGENT_SCENE="${ROBOT_AGENT_SCENE:-extinguisher_room}"
+if [[ "${ROBOT_AGENT_SCENE}" != "extinguisher_room" ]]; then
+    echo "Error: supported scene is extinguisher_room, got ${ROBOT_AGENT_SCENE}." >&2
+    exit 1
+fi
+scene_root=/app/turtlebot3_behavior_demos/tb3_worlds
+scene_world="${scene_root}/worlds/extinguisher_room.world"
+scene_map="${scene_root}/maps/extinguisher_room_map.yaml"
+export ROBOT_AGENT_LOCATION_FILE="${ROBOT_AGENT_LOCATION_FILE:-${scene_root}/maps/extinguisher_room_locations.yaml}"
+export ROBOT_AGENT_CENTER_ON_DETECTION="${ROBOT_AGENT_CENTER_ON_DETECTION:-true}"
+
+# The repository is bind-mounted at /app, while ament resolves tb3_worlds from
+# the image's overlay. Refresh runtime-only package resources so a synchronized
+# world/launch/script edit cannot be paired with stale files when SKIP_BUILD is
+# used. package.xml/CMake/dependency changes still require a real image build.
+tb3_install_prefix="$(ros2 pkg prefix tb3_worlds)"
+tb3_install_share="${tb3_install_prefix}/share/tb3_worlds"
+tb3_install_lib="${tb3_install_prefix}/lib/tb3_worlds"
+for resource_directory in launch maps models worlds; do
+    mkdir -p "${tb3_install_share}/${resource_directory}"
+    cp -a \
+        "${scene_root}/${resource_directory}/." \
+        "${tb3_install_share}/${resource_directory}/"
+done
+mkdir -p "${tb3_install_lib}"
+for executable in "${scene_root}"/scripts/*.py; do
+    install -m 0755 "${executable}" "${tb3_install_lib}/$(basename "${executable}")"
+done
+echo "Refreshed tb3_worlds runtime resources from /app"
+
+initial_x="${ROBOT_AGENT_INITIAL_X:--3.5}"
+initial_y="${ROBOT_AGENT_INITIAL_Y:--3.5}"
+initial_yaw="${ROBOT_AGENT_INITIAL_YAW:-0.0}"
+object_x="${ROBOT_AGENT_OBJECT_X:-0.0}"
+object_y="${ROBOT_AGENT_OBJECT_Y:-0.0}"
+object_yaw="${ROBOT_AGENT_OBJECT_YAW:-0.0}"
 
 if [[ "${ROBOT_AGENT_GUI:-false}" == "true" ]]; then
     : "${DISPLAY:?ROBOT_AGENT_GUI=true requires DISPLAY}"
@@ -31,8 +64,31 @@ else
     Xvfb "${DISPLAY}" -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
     xvfb_pid=$!
 fi
-ros2 launch tb3_worlds tb3_demo_world.launch.py >/tmp/turtlebot-demo-world.log 2>&1 &
+ros2 launch tb3_worlds tb3_demo_world.launch.py \
+    world:="${scene_world}" \
+    map:="${scene_map}" \
+    x_pose:="${initial_x}" \
+    y_pose:="${initial_y}" \
+    yaw_pose:="${initial_yaw}" \
+    object_x:="${object_x}" \
+    object_y:="${object_y}" \
+    object_yaw:="${object_yaw}" \
+    >/tmp/turtlebot-demo-world.log 2>&1 &
 simulation_pid=$!
+tf_probe_pid=""
+
+cleanup() {
+    for process_id in \
+        "${tf_probe_pid}" \
+        "${simulation_pid}" \
+        "${xvfb_pid}"; do
+        if [[ -n "${process_id}" ]]; then
+            kill "${process_id}" 2>/dev/null || true
+            wait "${process_id}" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup EXIT INT TERM
 
 # Keep one TF listener alive during startup. Recreating tf2_echo for every
 # readiness poll discards its DDS discovery and TF buffer, which can report a
@@ -41,18 +97,6 @@ simulation_pid=$!
 stdbuf -oL -eL ros2 run tf2_ros tf2_echo map base_link \
     >/tmp/robot-agent-map-tf.log 2>&1 &
 tf_probe_pid=$!
-
-cleanup() {
-    kill "${tf_probe_pid}" 2>/dev/null || true
-    wait "${tf_probe_pid}" 2>/dev/null || true
-    kill "${simulation_pid}" 2>/dev/null || true
-    wait "${simulation_pid}" 2>/dev/null || true
-    if [[ -n "${xvfb_pid}" ]]; then
-        kill "${xvfb_pid}" 2>/dev/null || true
-        wait "${xvfb_pid}" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
 
 required_lifecycle_nodes=(
     /map_server
@@ -113,13 +157,19 @@ for attempt in $(seq 1 180); do
     if [[ "${odom_ready}" == "true" ]] && map_transform_is_ready; then
         tf_ready=true
     fi
-    if [[ "${amcl_active}" == "true" && "${tf_ready}" == "false" ]] && \
+    if [[ "${amcl_active}" == "true" && \
+          "${odom_ready}" == "true" && \
+          "${scan_ready}" == "true" && \
+          "${tf_ready}" == "false" ]] && \
        (( attempt - last_initial_pose_attempt >= 10 )); then
         echo "AMCL is active but map TF is missing; publishing the initial pose..."
         python3 /app/turtlebot3_behavior_demos/tb3_worlds/scripts/set_init_amcl_pose.py \
             --ros-args \
             -r __node:=robot_agent_initial_pose_retry \
             -p use_sim_time:=true \
+            -p x:="${initial_x}" \
+            -p y:="${initial_y}" \
+            -p theta:="${initial_yaw}" \
             >>/tmp/initial-pose-retry.log 2>&1 &
         last_initial_pose_attempt=${attempt}
     fi
@@ -151,4 +201,4 @@ if [[ "${ready}" != "true" ]]; then
 fi
 
 echo "ROS2 simulation is ready. Agent commands will now execute through rclpy/Nav2."
-exec python /app/src/robot_agent/cli.py --execute-ros2 --ros-backend rclpy
+exec python /app/src/robot_agent/cli.py

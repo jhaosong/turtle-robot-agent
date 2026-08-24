@@ -28,9 +28,6 @@ class CountingRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class RepeatingBtSkill:
     def run(self, goal, *, navigate, stop, wait, abort, on_node_started):

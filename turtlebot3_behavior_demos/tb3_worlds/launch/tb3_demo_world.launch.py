@@ -18,16 +18,20 @@ def generate_launch_description():
             join(tb3_world_dir, "launch", "tb3_world.launch.py")
         ),
         launch_arguments={
-            "x_pose": LaunchConfiguration("x_pose", default=0.0),
-            "y_pose": LaunchConfiguration("y_pose", default=0.0),
+            "x_pose": LaunchConfiguration("x_pose", default=-3.5),
+            "y_pose": LaunchConfiguration("y_pose", default=-3.5),
+            "yaw_pose": LaunchConfiguration("yaw_pose", default=0.0),
+            "world": LaunchConfiguration(
+                "world",
+                default=join(tb3_world_dir, "worlds", "extinguisher_room.world"),
+            ),
         }.items(),
     )
-    # For some reason, there is an error with starting both spawn world and nav
-    # in this launch file without this delay ???
+    # Let Gazebo initialize before the navigation stack begins discovery.
     spawn_world_delayed = TimerAction(period=3.0, actions=[spawn_world])
 
     # Start navigation stack
-    default_map = join(tb3_world_dir, "maps", "sim_house_map.yaml")
+    default_map = join(tb3_world_dir, "maps", "extinguisher_room_map.yaml")
     nav_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             join(tb3_nav2_dir, "launch", "navigation2.launch.py")
@@ -43,7 +47,14 @@ def generate_launch_description():
         package="tb3_worlds",
         executable="set_init_amcl_pose.py",
         name="init_pose_publisher",
-        parameters=[{"use_sim_time": use_sim_time}],
+        parameters=[
+            {
+                "use_sim_time": use_sim_time,
+                "x": LaunchConfiguration("x_pose", default=-3.5),
+                "y": LaunchConfiguration("y_pose", default=-3.5),
+                "theta": LaunchConfiguration("yaw_pose", default=0.0),
+            }
+        ],
     )
 
     # Spawn the semantic-search target in front of its named observation pose.
@@ -51,9 +62,12 @@ def generate_launch_description():
         package="tb3_worlds",
         executable="fire_extinguisher_spawner.py",
         name="fire_extinguisher_spawner",
-        parameters=[
-            {"location_file": join(tb3_world_dir, "maps", "sim_house_locations.yaml")}
-        ],
+        parameters=[{
+            "x": LaunchConfiguration("object_x", default=0.0),
+            "y": LaunchConfiguration("object_y", default=0.0),
+            "z": LaunchConfiguration("object_z", default=0.30),
+            "yaw": LaunchConfiguration("object_yaw", default=0.0),
+        }],
     )
 
     return LaunchDescription(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -41,6 +42,22 @@ class UnicodeSerializationTest(unittest.TestCase):
             store.save({"goal": "bad\udce4input"})
 
             self.assertEqual(store.load(), {"goal": "bad\ufffdinput"})
+
+    def test_checkpoint_concurrent_saves_remain_atomic(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            path = root / "checkpoint.json"
+            store = JsonCheckpointStore(path)
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(lambda index: store.save({"index": index}), range(40)))
+
+            payload = store.load()
+            self.assertIn(payload["index"], range(40))
+            self.assertEqual(
+                [item for item in root.iterdir() if item.name.endswith(".tmp")],
+                [],
+            )
 
 
 if __name__ == "__main__":

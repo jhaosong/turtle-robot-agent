@@ -1,0 +1,4 @@
+inspection_start: [0.0, -2.5, 1.571]
+east_view: [2.5, 0.0, 3.142]
+north_view: [0.0, 2.5, -1.571]
+west_view: [-2.5, 0.0, 0.0]

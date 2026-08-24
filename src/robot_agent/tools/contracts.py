@@ -37,12 +37,6 @@ class FindObjectInput(BaseModel):
     label: str | None = Field(default=None, description="Optional object label, e.g. box")
 
 
-class InspectForColorInput(BaseModel):
-    color: Literal["red", "green", "blue"] = Field(
-        description="Color to inspect once using the TurtleBot camera"
-    )
-
-
 class SearchForObjectInput(BaseModel):
     route: list[str] = Field(
         min_length=1,
@@ -57,6 +51,27 @@ class SearchForObjectInput(BaseModel):
         if not self.color and not self.label:
             raise ValueError("search_for_object requires a color or label")
         return self
+
+
+class CircleObjectForInspectionInput(BaseModel):
+    label: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Open-vocabulary object label currently visible to the camera",
+    )
+    color: str | None = Field(default=None, description="Optional color qualifier")
+    viewpoint_count: int = Field(
+        default=4,
+        ge=3,
+        le=8,
+        description="Number of evenly spaced object-centric camera viewpoints",
+    )
+    radius_m: float | None = Field(
+        default=None,
+        ge=0.6,
+        le=3.0,
+        description="Desired inspection radius; defaults to runtime configuration",
+    )
 
 
 class BehaviorTreeSkillInput(BaseModel):

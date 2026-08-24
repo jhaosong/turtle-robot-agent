@@ -12,8 +12,12 @@ from robot_agent.agents.lead_agent import LeadTaskPlanner
 from robot_agent.config.settings import RobotAgentSettings
 from robot_agent.goal_monitor import GoalMonitor
 from robot_agent.models import load_chat_model
-from robot_agent.middlewares import ModelTerminationMiddleware, PlanCompletionMiddleware
-from robot_agent.ros import build_ros2_adapter
+from robot_agent.middlewares import (
+    ModelTerminationMiddleware,
+    PlanCompletionMiddleware,
+    SequentialToolCallMiddleware,
+)
+from robot_agent.ros import RclpyRos2Adapter
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.runtime.serialization import sanitize_text
 from robot_agent.skills import BehaviorTreeSkill
@@ -35,7 +39,19 @@ def build_bounded_goal(goal: str, plan: list[dict[str, Any]], robot_state: Any) 
 
 def build_lead_agent_middleware(runtime: RobotAgentRuntime) -> list[Any]:
     """Return registration order whose reverse after-model order repairs output first."""
-    return [PlanCompletionMiddleware(runtime), ModelTerminationMiddleware(runtime)]
+    perception_steps = sum(
+        step.get("preferred_capability") == "perception"
+        for step in runtime.state.plan
+    )
+    reminder_budget = perception_steps if perception_steps >= 4 else 2
+    return [
+        PlanCompletionMiddleware(
+            runtime,
+            max_reminders=min(reminder_budget, runtime.settings.max_tool_calls),
+        ),
+        SequentialToolCallMiddleware(runtime),
+        ModelTerminationMiddleware(runtime),
+    ]
 
 
 def build_verified_final_response(runtime: RobotAgentRuntime, run_status: str) -> str:
@@ -86,6 +102,35 @@ def build_verified_final_response(runtime: RobotAgentRuntime, run_status: str) -
                 f"yaw={observation_pose['yaw']}, frame={observation_pose['frame_id']}."
             )
 
+    successful_inspection = next(
+        (
+            entry["result"]["data"]
+            for entry in reversed(runtime.state.tool_history)
+            if entry["tool"] == "circle_object_for_inspection"
+            and entry["result"]["status"] == ToolStatus.SUCCESS.value
+        ),
+        None,
+    )
+    if successful_inspection is not None:
+        object_position = successful_inspection.get("object_position")
+        if isinstance(object_position, dict):
+            lines.append(
+                "Triangulated object position: "
+                f"x={float(object_position['x']):.3f}, "
+                f"y={float(object_position['y']):.3f}, "
+                f"frame={object_position['frame_id']}."
+            )
+        captures = successful_inspection.get("captures") or []
+        image_paths = [
+            item.get("image_path")
+            for item in captures
+            if isinstance(item, dict) and item.get("image_path")
+        ]
+        lines.append(
+            f"Verified inspection viewpoints: {len(captures)}; "
+            f"saved images: {len(image_paths)}."
+        )
+
     pose = evaluation.evidence.get("pose")
     if isinstance(pose, dict):
         lines.append(
@@ -112,7 +157,7 @@ class RoboticsAgentHarness:
         runtime = RobotAgentRuntime(self.settings, goal)
         locations = load_locations(self.settings.location_file)
         model = self.model or load_chat_model(streaming=False)
-        ros = build_ros2_adapter(self.settings, backend=self.settings.ros_backend)
+        ros = RclpyRos2Adapter(self.settings)
         bt_skill = BehaviorTreeSkill(
             model=model,
             known_locations=set(locations),
@@ -158,11 +203,26 @@ class RoboticsAgentHarness:
                 # for the terminal response while enforcing the configured cap.
                 config={
                     "metadata": assembly.metadata,
-                    "recursion_limit": 2 * self.settings.max_tool_calls + 2,
+                    # Each model/tool cycle traverses three after-model guards.
+                    # Tool-call count remains bounded independently by runtime.
+                    "recursion_limit": 3 * self.settings.max_tool_calls + 4,
                 },
             )
         except Exception as exc:
             runtime.emit("agent_failed", {"error_type": type(exc).__name__})
+            try:
+                stop_result = ros.stop_robot()
+                runtime.emit(
+                    "agent_failure_stop",
+                    {"result": stop_result.to_dict()},
+                    category="control",
+                )
+            except Exception as stop_exc:
+                runtime.emit(
+                    "agent_failure_stop_failed",
+                    {"error_type": type(stop_exc).__name__},
+                    category="control",
+                )
             runtime.finish("failed")
             raise RuntimeError(f"Lead agent invocation failed: {type(exc).__name__}") from exc
         finally:
@@ -179,8 +239,6 @@ class RoboticsAgentHarness:
             run_status = "safety_capped"
         elif evaluation.satisfied:
             run_status = "succeeded"
-        elif evaluation.blocker == GoalBlocker.EXTERNAL_WAIT:
-            run_status = "planned"
         elif evaluation.blocker in {GoalBlocker.RUN_FAILED, GoalBlocker.NO_PROGRESS}:
             run_status = "failed"
         elif evaluation.blocker == GoalBlocker.NEEDS_USER_INPUT:

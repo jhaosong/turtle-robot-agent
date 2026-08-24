@@ -1,8 +1,7 @@
 """Deterministic goal verification inspired by DeerFlow's goal evaluator.
 
 This monitor deliberately evaluates execution evidence instead of trusting the
-lead agent's natural-language final response. It is conservative: unavailable
-observations and dry-run commands can never be marked successful.
+lead agent's natural-language final response.
 """
 
 from __future__ import annotations
@@ -48,9 +47,6 @@ class GoalMonitor:
 
         if any(entry["result"]["status"] in {ToolStatus.FAILED.value, ToolStatus.TIMEOUT.value, ToolStatus.CANCELED.value} for entry in state.tool_history):
             return GoalEvaluation(False, GoalBlocker.RUN_FAILED, "At least one executed tool failed", {"failures": state.failures})
-
-        if any(entry["result"]["status"] == ToolStatus.PLANNED.value for entry in state.tool_history):
-            return GoalEvaluation(False, GoalBlocker.EXTERNAL_WAIT, "ROS2 commands were planned but not executed")
 
         pending_steps = [step for step in state.plan if step.get("status", "pending") != "completed"]
         if pending_steps:

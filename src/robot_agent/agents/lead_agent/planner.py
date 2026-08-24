@@ -18,8 +18,7 @@ class PlannedStep(BaseModel):
 
 class TaskPlan(BaseModel):
     objective: str
-    assumptions: list[str] = Field(default_factory=list)
-    steps: list[PlannedStep] = Field(default_factory=list, max_length=8)
+    steps: list[PlannedStep] = Field(default_factory=list, max_length=10)
     requires_perception: bool = False
     requested_colors: list[Literal["red", "green", "blue"]] = Field(default_factory=list, max_length=3)
     requested_labels: list[str] = Field(default_factory=list, max_length=3)
@@ -45,8 +44,9 @@ steps. If the user asks to navigate to an exact known location, produce exactly
 one navigation step, set requires_perception=false, and do not add verification
 or localization steps. Relative forward/backward movement is also one navigation
 step, but never assume a physical distance for an unspecified "unit". Use
-behavior_tree only for an explicitly reusable or
-multi-step procedure. Set requires_perception=true only when the user explicitly
+behavior_tree only when the user explicitly requests a behavior tree or a
+reusable patrol; a generic multi-step goal is not sufficient. Set
+requires_perception=true only when the user explicitly
 asks to observe or find something. A request to search while moving through an
 ordered set of known locations is one perception step: the search tool owns its
 continuous Nav2 route and camera checks, so do not expand it into navigation,
@@ -57,7 +57,14 @@ same label wording that the perception tool should query (for example,
 "fire extinguisher"). A goal may require colors, labels, or both. Treat "find/search in the
 room" as moving search across known locations, not a current-frame inspection.
 Never assume an object is already detected unless current semantic state
-explicitly contains a matching visible object."""
+explicitly contains a matching visible object. Object localization, bearing
+triangulation, orbiting, multi-view inspection, and photography are native
+perception capabilities, never behavior_tree tasks. For a goal that asks to
+find an object and then localize, inspect, read, or photograph it from multiple
+viewpoints, produce exactly two ordered perception steps: first find the object,
+then localize it and complete the deterministic multi-view inspection. The
+second step is one self-contained tool call; do not expose viewpoint angles or
+expand its internal navigation and capture loop into separate plan steps."""
 
 
 class LeadTaskPlanner:

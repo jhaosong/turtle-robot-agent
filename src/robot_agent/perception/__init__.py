@@ -1,21 +1,19 @@
 """Perception adapters that convert sensor data into semantic detections."""
 
-from .color_detection import detect_colored_blobs
+from .bearing_localization import (
+    TriangulatedEstimate,
+    bearing_from_detection,
+    triangulate_from_bearings,
+)
 from .detector import (
-    ColorBlobDetector,
     Detector,
-    VlmDetector,
-    YoloDetector,
     YoloeDetector,
-    build_detector,
 )
 
 __all__ = [
-    "ColorBlobDetector",
     "Detector",
-    "VlmDetector",
-    "YoloDetector",
     "YoloeDetector",
-    "build_detector",
-    "detect_colored_blobs",
+    "TriangulatedEstimate",
+    "bearing_from_detection",
+    "triangulate_from_bearings",
 ]

@@ -13,12 +13,10 @@ def utc_now() -> str:
 
 
 class ToolStatus(str, Enum):
-    RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
     CANCELED = "canceled"
-    PLANNED = "planned"
     NEEDS_INPUT = "needs_input"
 
 
@@ -27,7 +25,6 @@ class GoalBlocker(str, Enum):
     MISSING_EVIDENCE = "missing_evidence"
     NEEDS_USER_INPUT = "needs_user_input"
     RUN_FAILED = "run_failed"
-    EXTERNAL_WAIT = "external_wait"
     GOAL_NOT_MET_YET = "goal_not_met_yet"
     NO_PROGRESS = "no_progress"
 
@@ -100,12 +97,7 @@ class Detection:
     image_position: ImagePosition | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        result = asdict(self)
-        if self.position is not None:
-            result["position"] = self.position.to_dict()
-        if self.image_position is not None:
-            result["image_position"] = self.image_position.to_dict()
-        return result
+        return asdict(self)
 
     @classmethod
     def from_snapshot(cls, payload: dict[str, Any]) -> "Detection":
@@ -152,35 +144,26 @@ def goal_requirements_satisfied(
 @dataclass
 class RobotState:
     pose: Pose2D | None = None
-    last_planned_pose: Pose2D | None = None
     navigation_status: str = "unknown"
     visible_objects: list[Detection] = field(default_factory=list)
-    obstacle_ahead: bool | None = None
     last_perception_at: str | None = None
 
     def to_agent_context(self) -> dict[str, Any]:
         return {
             "pose": self.pose.to_dict() if self.pose else None,
-            "last_planned_pose": self.last_planned_pose.to_dict() if self.last_planned_pose else None,
             "navigation_status": self.navigation_status,
             "visible_objects": [item.to_dict() for item in self.visible_objects],
-            "obstacle_ahead": self.obstacle_ahead,
             "last_perception_at": self.last_perception_at,
         }
 
     @classmethod
     def from_snapshot(cls, payload: dict[str, Any]) -> "RobotState":
         pose = payload.get("pose")
-        last_planned_pose = payload.get("last_planned_pose")
         visible_objects = payload.get("visible_objects") or []
         return cls(
             pose=Pose2D(**pose) if isinstance(pose, dict) else None,
-            last_planned_pose=Pose2D(**last_planned_pose)
-            if isinstance(last_planned_pose, dict)
-            else None,
             navigation_status=str(payload.get("navigation_status", "unknown")),
             visible_objects=[Detection.from_snapshot(item) for item in visible_objects],
-            obstacle_ahead=payload.get("obstacle_ahead"),
             last_perception_at=payload.get("last_perception_at"),
         )
 
@@ -218,6 +201,7 @@ class RunState:
     robot_state: RobotState = field(default_factory=RobotState)
     plan: list[dict[str, Any]] = field(default_factory=list)
     goal_requirements: dict[str, Any] = field(default_factory=dict)
+    inspection_state: dict[str, Any] | None = None
     last_tool_result: ToolResult | None = None
     tool_history: list[dict[str, Any]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -236,6 +220,7 @@ class RunState:
             "goal": self.goal,
             "plan": self.plan,
             "goal_requirements": self.goal_requirements,
+            "inspection_state": self.inspection_state,
             "robot_state": self.robot_state.to_agent_context(),
             "last_tool_result": self.last_tool_result.to_dict() if self.last_tool_result else None,
             "failures": self.failures[-3:],
@@ -258,6 +243,7 @@ class RunState:
             "robot_state": self.robot_state.to_agent_context(),
             "plan": self.plan,
             "goal_requirements": self.goal_requirements,
+            "inspection_state": self.inspection_state,
             "last_tool_result": self.last_tool_result.to_dict() if self.last_tool_result else None,
             "tool_history": self.tool_history,
             "failures": self.failures,
@@ -284,4 +270,5 @@ class RunState:
             "robot_state": self.robot_state.to_agent_context(),
             "visited_locations": list(self.visited_locations),
             "current_bt_node_index": self.current_bt_node_index,
+            "inspection_state": self.inspection_state,
         }

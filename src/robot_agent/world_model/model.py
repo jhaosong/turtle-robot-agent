@@ -14,13 +14,8 @@ class WorldModel:
     def update_pose(self, pose: Pose2D) -> None:
         self.robot_state.pose = pose
 
-    def update_navigation_status(
-        self,
-        status: str,
-        planned_pose: Pose2D | None,
-    ) -> None:
+    def update_navigation_status(self, status: str) -> None:
         self.robot_state.navigation_status = status
-        self.robot_state.last_planned_pose = planned_pose
 
     def update_detections(self, detections: list[Detection]) -> None:
         self.robot_state.visible_objects = detections

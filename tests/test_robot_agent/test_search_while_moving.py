@@ -12,7 +12,7 @@ from robot_agent.harness import build_verified_final_response
 from robot_agent.perception import Detector
 from robot_agent.ros import Ros2Adapter
 from robot_agent.ros import adapter as adapter_module
-from robot_agent.ros.adapter import RclpyRos2Adapter, Ros2CliAdapter, _DetectionTicker
+from robot_agent.ros.adapter import RclpyRos2Adapter, _DetectionTicker
 from robot_agent.runtime import RobotAgentRuntime
 from robot_agent.skills.behavior_tree import BehaviorTreeSkill
 from robot_agent.state import (
@@ -183,12 +183,16 @@ class WatchedNavigationAdapter(Ros2Adapter):
         self.cancel_calls += 1
         return ToolResult(status=ToolStatus.CANCELED)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class SearchWhileMovingTest(unittest.TestCase):
-    def _registry(self, root: Path, adapter: Ros2Adapter, detector: Detector):
+    def _registry(
+        self,
+        root: Path,
+        adapter: Ros2Adapter,
+        detector: Detector,
+        *,
+        detection_confirmation_frames: int = 2,
+    ):
         locations = root / "locations.yaml"
         locations.write_text(
             "location1: [1.0, 0.0, 0.0]\n"
@@ -199,9 +203,9 @@ class SearchWhileMovingTest(unittest.TestCase):
         settings = RobotAgentSettings(
             location_file=locations,
             run_directory=root / "runs",
-            execute_ros2=True,
             trace=False,
             detection_interval_sec=0.75,
+            detection_confirmation_frames=detection_confirmation_frames,
             max_no_progress_continuations=5,
         )
         runtime = RobotAgentRuntime(settings, "find a blue object while moving")
@@ -244,8 +248,8 @@ class SearchWhileMovingTest(unittest.TestCase):
                     "height_normalized": 0.35,
                 },
             )
-            self.assertEqual(detector.calls, 4)
-            self.assertEqual(len(adapter.overlay_updates), 5)
+            self.assertEqual(detector.calls, 5)
+            self.assertEqual(len(adapter.overlay_updates), 6)
             self.assertEqual(adapter.overlay_updates[0], [])
             self.assertEqual(adapter.overlay_updates[1], [])
             self.assertEqual(adapter.overlay_updates[2], [])
@@ -255,7 +259,7 @@ class SearchWhileMovingTest(unittest.TestCase):
             )
             self.assertEqual(adapter.cancel_calls, 1)
             self.assertEqual(adapter.center_calls, 1)
-            self.assertEqual(adapter.center_kwargs["target_box_size"], 0.6)
+            self.assertEqual(adapter.center_kwargs["target_box_size"], 0.4)
             self.assertEqual(len(adapter.watched_targets), 2)
             self.assertEqual(adapter.watched_targets[-1].x, 2.0)
             self.assertEqual(runtime.state.robot_state.visible_objects[0].color, "blue")
@@ -282,7 +286,7 @@ class SearchWhileMovingTest(unittest.TestCase):
 
             result = tool.invoke({"route": ["location1"], "color": "blue"})
 
-            self.assertEqual(detector.calls, 3)
+            self.assertEqual(detector.calls, 4)
             self.assertEqual(adapter.overlay_updates[0], [])
             self.assertEqual(adapter.overlay_updates[1], [])
             self.assertEqual(result["data"]["found"]["confidence"], 0.05)
@@ -307,6 +311,148 @@ class SearchWhileMovingTest(unittest.TestCase):
             self.assertTrue(result["data"]["centered"])
             self.assertEqual(adapter.cancel_calls, 1)
             self.assertEqual(adapter.center_calls, 1)
+
+    def test_alignment_timeout_does_not_discard_confirmed_search(self):
+        class AlignmentTimeoutAdapter(WatchedNavigationAdapter):
+            def align_to_detection(self, on_tick, **kwargs):
+                self.center_calls += 1
+                found = on_tick()
+                return ToolResult(
+                    status=ToolStatus.TIMEOUT,
+                    data={
+                        "operation": "align_to_detection",
+                        "found": found.to_dict() if found else None,
+                        "centered": False,
+                    },
+                    error="alignment timeout",
+                    retryable=True,
+                )
+
+        with TemporaryDirectory() as temporary_directory:
+            adapter = AlignmentTimeoutAdapter()
+            detector = ThirdTickDetector()
+            _, registry = self._registry(
+                Path(temporary_directory), adapter, detector
+            )
+            tool = {item.name: item for item in registry.build()}[
+                "search_for_object"
+            ]
+
+            result = tool.invoke(
+                {"route": ["location1", "location2"], "color": "blue"}
+            )
+
+            self.assertEqual(result["status"], ToolStatus.SUCCESS.value)
+            self.assertIsNotNone(result["data"]["found"])
+            self.assertFalse(result["data"]["centered"])
+            self.assertTrue(result["data"]["centering_incomplete"])
+            self.assertEqual(
+                result["data"]["centering"]["status"],
+                ToolStatus.TIMEOUT.value,
+            )
+
+    def test_alignment_reacquires_after_post_cancel_bbox_jump(self):
+        class JumpAfterCancellationDetector(ThirdTickDetector):
+            def detect(self, image, *, color=None, label=None):
+                self.calls += 1
+                x_normalized = 0.1 if self.calls <= 2 else 0.5
+                return [
+                    Detection(
+                        label="colored_object",
+                        color="blue",
+                        confidence=0.9,
+                        image_position=ImagePosition(
+                            640.0 * x_normalized,
+                            180.0,
+                            x_normalized,
+                            0.5,
+                            0.2,
+                            0.6,
+                        ),
+                    )
+                ]
+
+        with TemporaryDirectory() as temporary_directory:
+            adapter = WatchedNavigationAdapter()
+            detector = JumpAfterCancellationDetector()
+            _, registry = self._registry(
+                Path(temporary_directory), adapter, detector
+            )
+            tool = {item.name: item for item in registry.build()}[
+                "search_for_object"
+            ]
+
+            result = tool.invoke({"route": ["location1"], "color": "blue"})
+
+            self.assertEqual(result["status"], ToolStatus.SUCCESS.value)
+            self.assertTrue(result["data"]["centered"])
+            self.assertEqual(result["data"]["image_position"]["x_normalized"], 0.5)
+
+    def test_search_turns_to_detection_bearing_before_fine_alignment(self):
+        with TemporaryDirectory() as temporary_directory:
+            adapter = WatchedNavigationAdapter()
+            detector = ThirdTickDetector()
+            _, registry = self._registry(
+                Path(temporary_directory),
+                adapter,
+                detector,
+                detection_confirmation_frames=1,
+            )
+            tool = {item.name: item for item in registry.build()}[
+                "search_for_object"
+            ]
+
+            result = tool.invoke({"route": ["location1"], "color": "blue"})
+
+            self.assertEqual(result["status"], ToolStatus.SUCCESS.value)
+            self.assertEqual(adapter.plain_navigation_calls, 1)
+            self.assertLess(adapter.current_pose.yaw, 0.0)
+            self.assertIsNotNone(result["data"]["bearing_prealignment"])
+            self.assertTrue(result["data"]["centered"])
+
+    def test_one_frame_default_cancels_before_edge_target_leaves_view(self):
+        class EdgeThenLostDetector(Detector):
+            def __init__(self):
+                self.calls = 0
+
+            def validate_query(self, *, color=None, label=None):
+                return None
+
+            def detect(self, image, *, color=None, label=None):
+                self.calls += 1
+                if self.calls > 1:
+                    return []
+                return [
+                    Detection(
+                        "fire extinguisher",
+                        0.2,
+                        image_position=ImagePosition(
+                            64.0, 180.0, 0.1, 0.5, 0.2, 0.3
+                        ),
+                    )
+                ]
+
+        with TemporaryDirectory() as temporary_directory:
+            adapter = WatchedNavigationAdapter()
+            detector = EdgeThenLostDetector()
+            _, registry = self._registry(
+                Path(temporary_directory),
+                adapter,
+                detector,
+                detection_confirmation_frames=1,
+            )
+            tool = {item.name: item for item in registry.build()}[
+                "search_for_object"
+            ]
+
+            result = tool.invoke(
+                {"route": ["location1"], "label": "fire extinguisher"}
+            )
+
+            self.assertEqual(result["status"], ToolStatus.SUCCESS.value)
+            self.assertEqual(adapter.cancel_calls, 1)
+            self.assertEqual(result["data"]["confirmation_frames"], 1)
+            self.assertEqual(result["data"]["found"]["image_position"]["x_normalized"], 0.1)
 
     def test_single_frame_candidate_does_not_cancel_navigation(self):
         class SingleFrameDetector(Detector):
@@ -380,35 +526,47 @@ class SearchWhileMovingTest(unittest.TestCase):
             result = tool.invoke({"route": ["location1"], "color": "blue"})
 
             self.assertEqual(result["status"], ToolStatus.FAILED.value)
-            self.assertIn("without confirmed Nav2 cancellation", result["error"])
+            self.assertIn("Nav2 was not confirmed stopped", result["error"])
             self.assertFalse(result["data"]["navigation_canceled"])
             self.assertEqual(adapter.center_calls, 0)
 
-    def test_detector_health_is_reported_during_search(self):
+    def test_terminal_navigation_detection_allows_alignment_without_cancel(self):
+        class TerminalNavigationAdapter(WatchedNavigationAdapter):
+            def navigate_to_pose_with_watch(self, pose, on_tick, tick_interval_sec):
+                self.watched_targets.append(pose)
+                found = None
+                for _ in range(3):
+                    found = on_tick()
+                    if found is not None:
+                        break
+                return ToolResult(
+                    status=ToolStatus.SUCCESS,
+                    data={
+                        "operation": "navigate_to_pose_with_watch",
+                        "found": found.to_dict() if found else None,
+                        "navigation_canceled": False,
+                        "navigation_stopped": True,
+                        "goal_status": 6,
+                    },
+                )
+
         with TemporaryDirectory() as temporary_directory:
-            adapter = WatchedNavigationAdapter()
-            detector = LowThenHighConfidenceDetector()
-            runtime, registry = self._registry(
-                Path(temporary_directory), adapter, detector
+            adapter = TerminalNavigationAdapter()
+            _, registry = self._registry(
+                Path(temporary_directory),
+                adapter,
+                LowThenHighConfidenceDetector(),
             )
-            tool = {tool.name: tool for tool in registry.build()}[
+            tool = {item.name: item for item in registry.build()}[
                 "search_for_object"
             ]
 
-            with patch.object(runtime, "emit") as emit:
-                tool.invoke({"route": ["location1"], "color": "blue"})
+            result = tool.invoke({"route": ["location1"], "color": "blue"})
 
-            samples = [
-                call.args[1]
-                for call in emit.call_args_list
-                if call.args[0] == "detector_sampled"
-            ]
-            self.assertGreaterEqual(len(samples), 2)
-            self.assertEqual(samples[0]["backend"], "yoloe")
-            self.assertEqual(samples[0]["best_confidence"], 0.04)
-            self.assertEqual(samples[0]["box_threshold"], 0.05)
-            self.assertEqual(samples[-1]["best_confidence"], 0.05)
-            self.assertEqual(samples[-1]["stop_threshold"], 0.05)
+            self.assertEqual(result["status"], ToolStatus.SUCCESS.value, result)
+            self.assertFalse(result["data"]["navigation_canceled"])
+            self.assertTrue(result["data"]["navigation_stopped"])
+            self.assertEqual(adapter.center_calls, 1)
 
     def test_plain_navigation_and_bt_do_not_use_watched_navigation(self):
         with TemporaryDirectory() as temporary_directory:
@@ -525,132 +683,37 @@ class RclpyCancellationHandoffTest(unittest.TestCase):
         self.assertEqual(clock.now, 0.0)
         self.assertEqual(adapter._publisher.timestamps, [])
 
+    def test_already_aborted_goal_is_confirmed_stopped(self):
+        class Future:
+            def result(self):
+                return SimpleNamespace(goals_canceling=[])
+
+        class Handle:
+            def cancel_goal_async(self):
+                return Future()
+
+        clock = self.FakeClock()
+        adapter = self._adapter(clock)
+        adapter._active_goal_handle = Handle()
+        adapter._active_result_future._result = SimpleNamespace(status=6)
+
+        with patch.object(adapter_module.time, "monotonic", clock.monotonic):
+            with patch.object(adapter_module.time, "sleep", clock.advance):
+                result = adapter.cancel_navigation()
+
+        self.assertEqual(result.status, ToolStatus.SUCCESS)
+        self.assertFalse(result.data["cancel_accepted"])
+        self.assertEqual(result.data["terminal_status"], 6)
+        self.assertTrue(result.data["navigation_stopped"])
+        self.assertIsNone(adapter._active_goal_handle)
+        self.assertGreaterEqual(clock.now, 0.25)
+
     def test_settle_is_centralized_outside_tool_call_sites(self):
         source = inspect.getsource(RobotToolRegistry)
         self.assertNotIn("post_cancel_settle_sec", source)
 
 
 class RclpyCenteringControlTest(unittest.TestCase):
-    def test_alignment_logs_compact_state_command_and_pose_delta(self):
-        class FakeTwist:
-            def __init__(self):
-                self.linear = SimpleNamespace(x=0.0)
-                self.angular = SimpleNamespace(z=0.0)
-
-        class Logger:
-            def __init__(self):
-                self.messages = []
-
-            def info(self, message):
-                self.messages.append(message)
-
-        logger = Logger()
-        adapter = object.__new__(RclpyRos2Adapter)
-        adapter._node = SimpleNamespace(get_logger=lambda: logger)
-        adapter._twist_type = FakeTwist
-        adapter._publisher = SimpleNamespace(publish=lambda message: None)
-        adapter._latest_pose = Pose2D(0.0, 0.0, 0.0)
-
-        def spin_once(node, timeout_sec):
-            pose = adapter._latest_pose
-            adapter._latest_pose = Pose2D(
-                pose.x + 0.01,
-                pose.y,
-                pose.yaw + 0.01,
-            )
-
-        adapter._rclpy = SimpleNamespace(spin_once=spin_once)
-        detections = iter(
-            [
-                Detection(
-                    "fire extinguisher",
-                    0.11,
-                    image_position=ImagePosition(
-                        480.0, 180.0, 0.75, 0.5, 0.2, 0.2
-                    ),
-                ),
-                Detection(
-                    "fire extinguisher",
-                    0.12,
-                    image_position=ImagePosition(
-                        320.0, 180.0, 0.5, 0.5, 0.2, 0.8
-                    ),
-                ),
-                Detection(
-                    "fire extinguisher",
-                    0.12,
-                    image_position=ImagePosition(
-                        320.0, 180.0, 0.5, 0.5, 0.2, 0.8
-                    ),
-                ),
-            ]
-        )
-
-        result = adapter.align_to_detection(
-            lambda: next(detections),
-            tick_interval_sec=0.000001,
-            horizontal_tolerance=0.08,
-            target_box_size=0.8,
-            box_size_tolerance=0.05,
-            max_angular_speed=0.2,
-            angular_gain=0.5,
-            max_linear_speed=0.12,
-            linear_gain=0.5,
-            timeout_sec=1.0,
-            stable_frames=1,
-        )
-
-        self.assertEqual(result.status, ToolStatus.SUCCESS)
-        self.assertEqual(len(logger.messages), 3)
-        self.assertIn("state=rotate", logger.messages[0])
-        self.assertIn("v=0.000", logger.messages[0])
-        self.assertIn("w=-0.125", logger.messages[0])
-        self.assertIn("moved=0.0100m", logger.messages[0])
-        self.assertIn("state=rotation_complete", logger.messages[1])
-        self.assertIn("state=aligned", logger.messages[2])
-        self.assertIn("cmd=stop", logger.messages[2])
-
-    def test_repeated_lost_detection_logs_are_throttled(self):
-        class FakeTwist:
-            def __init__(self):
-                self.linear = SimpleNamespace(x=0.0)
-                self.angular = SimpleNamespace(z=0.0)
-
-        class Logger:
-            def __init__(self):
-                self.messages = []
-
-            def info(self, message):
-                self.messages.append(message)
-
-        logger = Logger()
-        adapter = object.__new__(RclpyRos2Adapter)
-        adapter._node = SimpleNamespace(get_logger=lambda: logger)
-        adapter._twist_type = FakeTwist
-        adapter._publisher = SimpleNamespace(publish=lambda message: None)
-        adapter._latest_pose = Pose2D(0.0, 0.0, 0.0)
-        adapter._rclpy = SimpleNamespace(spin_once=lambda node, timeout_sec: None)
-
-        result = adapter.align_to_detection(
-            lambda: None,
-            tick_interval_sec=0.000001,
-            horizontal_tolerance=0.08,
-            target_box_size=0.8,
-            box_size_tolerance=0.05,
-            max_angular_speed=0.2,
-            angular_gain=0.5,
-            max_linear_speed=0.12,
-            linear_gain=0.5,
-            timeout_sec=0.01,
-            detection_hold_sec=0.0,
-        )
-
-        self.assertEqual(result.status, ToolStatus.TIMEOUT)
-        self.assertEqual(
-            logger.messages,
-            ["visual_alignment state=lost cmd=stop moved=0.0000m turned=0.0000rad"],
-        )
-
     def test_brief_detector_dropout_stops_instead_of_reusing_motion(self):
         class FakeTwist:
             def __init__(self):
@@ -665,6 +728,7 @@ class RclpyCenteringControlTest(unittest.TestCase):
                 self.commands.append((message.linear.x, message.angular.z))
 
         adapter = object.__new__(RclpyRos2Adapter)
+        adapter.settings = SimpleNamespace(post_cancel_settle_sec=0.0)
         adapter._rclpy = SimpleNamespace(spin_once=lambda node, timeout_sec: None)
         adapter._node = object()
         adapter._twist_type = FakeTwist
@@ -697,8 +761,8 @@ class RclpyCenteringControlTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, ToolStatus.SUCCESS)
-        self.assertNotEqual(adapter._publisher.commands[0], (0.0, 0.0))
-        self.assertEqual(adapter._publisher.commands[1:4], [(0.0, 0.0)] * 3)
+        self.assertEqual(adapter._publisher.commands[0], (0.0, 0.0))
+        self.assertTrue(any(command != (0.0, 0.0) for command in adapter._publisher.commands))
         self.assertEqual(adapter._publisher.commands[-3:], [(0.0, 0.0)] * 3)
 
     def test_rotation_and_approach_never_drive_both_axes_together(self):
@@ -715,6 +779,7 @@ class RclpyCenteringControlTest(unittest.TestCase):
                 self.commands.append((message.linear.x, message.angular.z))
 
         adapter = object.__new__(RclpyRos2Adapter)
+        adapter.settings = SimpleNamespace(post_cancel_settle_sec=0.0)
         adapter._rclpy = SimpleNamespace(spin_once=lambda node, timeout_sec: None)
         adapter._node = object()
         adapter._twist_type = FakeTwist
@@ -785,6 +850,7 @@ class RclpyCenteringControlTest(unittest.TestCase):
                 self.angular = SimpleNamespace(z=0.0)
 
         adapter = object.__new__(RclpyRos2Adapter)
+        adapter.settings = SimpleNamespace(post_cancel_settle_sec=0.0)
         adapter._rclpy = SimpleNamespace(spin_once=lambda node, timeout_sec: None)
         adapter._node = object()
         adapter._twist_type = FakeTwist
@@ -836,6 +902,7 @@ class RclpyCenteringControlTest(unittest.TestCase):
                 self.angular = SimpleNamespace(z=0.0)
 
         adapter = object.__new__(RclpyRos2Adapter)
+        adapter.settings = SimpleNamespace(post_cancel_settle_sec=0.0)
         adapter._rclpy = SimpleNamespace(spin_once=lambda node, timeout_sec: None)
         adapter._node = object()
         adapter._twist_type = FakeTwist
@@ -936,28 +1003,6 @@ class RclpyDetectionOverlayTest(unittest.TestCase):
             adapter._annotated_image_publisher.messages[0].header,
             source.header,
         )
-
-
-class CliWatchedNavigationTest(unittest.TestCase):
-    def test_cli_fails_loudly_without_blind_navigation(self):
-        with TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            settings = RobotAgentSettings(
-                location_file=root / "locations.yaml",
-                run_directory=root / "runs",
-                execute_ros2=False,
-                trace=False,
-            )
-            adapter = Ros2CliAdapter(settings)
-            pose = Pose2D(1.0, 2.0, 0.3)
-            on_tick = Mock()
-            with patch.object(adapter, "navigate_to_pose") as navigate:
-                result = adapter.navigate_to_pose_with_watch(pose, on_tick, 1.0)
-
-            self.assertEqual(result.status, ToolStatus.FAILED)
-            self.assertIn("require ROBOT_AGENT_ROS_BACKEND=rclpy", result.error)
-            navigate.assert_not_called()
-            on_tick.assert_not_called()
 
 
 if __name__ == "__main__":

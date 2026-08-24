@@ -25,9 +25,6 @@ class UnusedRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         raise AssertionError("cancellation is not expected")
 
-    def detect_color(self, color: str) -> ToolResult:
-        raise AssertionError("perception is not expected")
-
 
 class WaitCallingBehaviorTree:
     def run(self, goal, *, navigate, stop, wait, abort, on_node_started):
@@ -58,7 +55,7 @@ class WaitDeduplicationTest(unittest.TestCase):
             registry = self._registry(Path(temporary_directory), object())
             registry._wait_for = Mock(
                 return_value=ToolResult(
-                    status=ToolStatus.PLANNED,
+                    status=ToolStatus.SUCCESS,
                     data={"operation": "wait", "seconds": 1.5},
                 )
             )
@@ -76,7 +73,7 @@ class WaitDeduplicationTest(unittest.TestCase):
             )
             registry._wait_for = Mock(
                 return_value=ToolResult(
-                    status=ToolStatus.PLANNED,
+                    status=ToolStatus.SUCCESS,
                     data={"operation": "wait", "seconds": 2.5},
                 )
             )

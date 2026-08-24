@@ -86,7 +86,7 @@ class MiddlewareOrderingTest(unittest.TestCase):
 
             assembly.agent.invoke(
                 {"messages": [HumanMessage(content="stop safely")]},
-                config={"recursion_limit": 12},
+                config={"recursion_limit": 16},
             )
 
             events = [

@@ -28,9 +28,6 @@ class NoopRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         return ToolResult(status=ToolStatus.SUCCESS)
 
-    def detect_color(self, color: str) -> ToolResult:
-        return ToolResult(status=ToolStatus.SUCCESS, data={"detections": []})
-
 
 class NoProgressTest(unittest.TestCase):
     def test_unchanged_successes_trigger_no_progress_blocker(self):
@@ -41,7 +38,6 @@ class NoProgressTest(unittest.TestCase):
             settings = RobotAgentSettings(
                 location_file=location_file,
                 run_directory=root / "runs",
-                execute_ros2=True,
                 trace=False,
                 max_tool_calls=12,
                 max_no_progress_continuations=3,
@@ -65,7 +61,7 @@ class NoProgressTest(unittest.TestCase):
                 )
 
             with (
-                patch.object(harness_module, "build_ros2_adapter", lambda settings, backend: NoopRosAdapter()),
+                patch.object(harness_module, "RclpyRos2Adapter", lambda settings: NoopRosAdapter()),
                 patch.object(harness_module, "make_lead_agent", fake_make_lead_agent),
                 patch.object(
                     harness_module.LeadTaskPlanner,

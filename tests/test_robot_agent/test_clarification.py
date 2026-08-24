@@ -25,9 +25,6 @@ class UnusedRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         raise AssertionError
 
-    def detect_color(self, color: str) -> ToolResult:
-        raise AssertionError
-
 
 class ClarificationTest(unittest.TestCase):
     def test_structured_clarification_surfaces_as_goal_blocker(self):

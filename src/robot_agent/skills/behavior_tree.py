@@ -208,7 +208,7 @@ class BehaviorTreeSkill:
                 for attempt in range(self.navigation_retry_count + 1):
                     result = navigate(node.location or "", index)
                     attempts.append({"attempt": attempt + 1, "result": result.to_dict()})
-                    if result.status in {ToolStatus.SUCCESS, ToolStatus.PLANNED} or not result.retryable:
+                    if result.status == ToolStatus.SUCCESS or not result.retryable:
                         break
             elif node.type == "Wait":
                 result = wait(node.seconds or 0.0, index)
@@ -224,7 +224,7 @@ class BehaviorTreeSkill:
                     "attempts": attempts,
                 }
             )
-            if result.status not in {ToolStatus.SUCCESS, ToolStatus.PLANNED}:
+            if result.status != ToolStatus.SUCCESS:
                 abort_result = abort()
                 return ToolResult(
                     status=result.status,
@@ -232,7 +232,7 @@ class BehaviorTreeSkill:
                     error=result.error or "Behavior tree node failed",
                     retryable=result.retryable,
                 )
-        status = ToolStatus.PLANNED if any(
-            entry["result"]["status"] == ToolStatus.PLANNED.value for entry in node_results
-        ) else ToolStatus.SUCCESS
-        return ToolResult(status=status, data={**generated.data, "node_results": node_results})
+        return ToolResult(
+            status=ToolStatus.SUCCESS,
+            data={**generated.data, "node_results": node_results},
+        )

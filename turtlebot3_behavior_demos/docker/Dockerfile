@@ -45,12 +45,22 @@ ENTRYPOINT ["/entrypoint.sh"]
 FROM base AS overlay
 RUN mkdir -p /overlay_ws/src
 WORKDIR /overlay_ws
+
+# Resolve ROS dependencies from package metadata before copying frequently
+# edited worlds, launch files, and scripts. This expensive network layer stays
+# cached unless package.xml itself changes.
+COPY tb3_worlds/package.xml /tmp/tb3_worlds/package.xml
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    source /turtlebot3_ws/install/setup.bash \
+    && apt-get update \
+    && rosdep install --from-paths /tmp/tb3_worlds \
+        --ignore-src --rosdistro ${ROS_DISTRO} -y \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY tb3_worlds/ ./src/tb3_worlds/
 RUN source /turtlebot3_ws/install/setup.bash \
-    && apt-get update \
-    && rosdep install --from-paths src --ignore-src --rosdistro ${ROS_DISTRO} -y \
     && colcon build --symlink-install --parallel-workers ${COLCON_PARALLEL_WORKERS} \
-    && rm -rf /var/lib/apt/lists/*
+        --event-handlers console_cohesion+
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh /overlay_ws/src/tb3_worlds/scripts/*.py

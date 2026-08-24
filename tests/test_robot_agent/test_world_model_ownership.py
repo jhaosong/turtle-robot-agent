@@ -13,14 +13,9 @@ class WorldModelOwnershipTest(unittest.TestCase):
         world = WorldModel(state)
         planned = Pose2D(1.0, 2.0, 0.5)
 
-        world.update_navigation_status("planned", planned)
-        self.assertEqual(state.navigation_status, "planned")
-        self.assertIs(state.last_planned_pose, planned)
-
-        world.update_navigation_status("succeeded", None)
+        world.update_navigation_status("succeeded")
         world.update_pose(planned)
         self.assertEqual(state.navigation_status, "succeeded")
-        self.assertIsNone(state.last_planned_pose)
         self.assertIs(state.pose, planned)
 
     def test_registry_does_not_bypass_world_model_robot_state(self):

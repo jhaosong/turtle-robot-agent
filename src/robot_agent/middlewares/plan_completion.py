@@ -42,10 +42,7 @@ class PlanCompletionMiddleware(AgentMiddleware[AgentState]):
         if last_ai is None or _has_tool_intent(last_ai):
             return None
         last_result = self.robot_runtime.state.last_tool_result
-        if last_result is not None and last_result.status in {
-            ToolStatus.NEEDS_INPUT,
-            ToolStatus.PLANNED,
-        }:
+        if last_result is not None and last_result.status == ToolStatus.NEEDS_INPUT:
             return None
         pending = self._pending_steps()
         if not pending:

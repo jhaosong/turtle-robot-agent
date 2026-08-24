@@ -25,21 +25,18 @@ from .journal import RunJournal
 
 
 class RobotAgentRuntime:
-    # High-rate telemetry remains available in events.jsonl without flooding
-    # the interactive agent terminal.
-    _JOURNAL_ONLY_EVENTS = {"detector_sampled"}
-
     _TOOL_CAPABILITIES = {
         "navigate_to": "navigation",
         "navigate_to_pose": "navigation",
         "move_relative": "navigation",
-        "inspect_for_color": "perception",
         "search_for_object": "perception",
+        "circle_object_for_inspection": "perception",
         "find_object": "perception",
         "run_behavior_tree": "behavior_tree",
         "stop_robot": "control",
         "wait_seconds": "control",
     }
+
     def __init__(self, settings: RobotAgentSettings, goal: str) -> None:
         self.settings = settings
         run_id = uuid4().hex[:12]
@@ -65,13 +62,13 @@ class RobotAgentRuntime:
         self._no_progress_event_emitted = False
         self.journal = RunJournal(self.run_path / "events.jsonl", run_id)
         self.checkpoint = JsonCheckpointStore(self.run_path / "checkpoint.json")
-        self.emit("run_started", {"goal": goal, "execute_ros2": settings.execute_ros2})
+        self.emit("run_started", {"goal": goal})
         self.save_checkpoint()
 
     def emit(self, event_type: str, payload: dict, category: str = "lifecycle") -> None:
         event = RuntimeEvent(run_id=self.state.run_id, type=event_type, payload=payload, category=category)
         self.journal.append(event)
-        if self.settings.trace and event_type not in self._JOURNAL_ONLY_EVENTS:
+        if self.settings.trace:
             print(f"[ROBOT AGENT] {event_type}: {payload}")
 
     def record_tool_result(self, tool_name: str, arguments: dict, result: ToolResult) -> None:

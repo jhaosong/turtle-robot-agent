@@ -25,23 +25,17 @@ def validate_location_file(settings: RobotAgentSettings) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DeerFlow-inspired ROS2 TurtleBot agent")
-    parser.add_argument("--execute-ros2", action="store_true", help="Actually send ROS2 commands")
     parser.add_argument("--no-trace", action="store_true", help="Disable runtime event printing")
     parser.add_argument("--location-file", type=Path, help="Override TurtleBot location YAML")
-    parser.add_argument("--ros-backend", choices=("cli", "rclpy"), help="ROS2 transport backend")
     args = parser.parse_args()
 
     dotenv.load_dotenv(dotenv.find_dotenv())
     root = Path(__file__).resolve().parents[2]
     settings = RobotAgentSettings.from_env(root)
-    if args.execute_ros2:
-        settings = replace(settings, execute_ros2=True)
     if args.no_trace:
         settings = replace(settings, trace=False)
     if args.location_file:
         settings = replace(settings, location_file=args.location_file)
-    if args.ros_backend:
-        settings = replace(settings, ros_backend=args.ros_backend)
     validate_location_file(settings)
 
     print("ROS2 TurtleBot agent. Type `exit` to quit.")
@@ -67,7 +61,6 @@ def main() -> None:
                     "status": result["run_status"],
                     "tool_calls": len(result["tool_history"]),
                     "confirmed_pose": robot_state["pose"],
-                    "dry_run_planned_pose": robot_state["last_planned_pose"],
                 },
                 indent=2,
             )

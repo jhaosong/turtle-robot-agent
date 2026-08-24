@@ -24,9 +24,6 @@ class UnusedRosAdapter(Ros2Adapter):
     def cancel_navigation(self) -> ToolResult:
         raise AssertionError("unexpected cancellation")
 
-    def detect_color(self, color: str) -> ToolResult:
-        raise AssertionError("unexpected perception")
-
 
 class LoopDetectionTest(unittest.TestCase):
     def test_warns_on_third_identical_call_and_blocks_fifth(self):

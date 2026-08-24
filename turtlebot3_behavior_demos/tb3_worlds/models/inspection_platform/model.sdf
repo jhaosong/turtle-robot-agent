@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="inspection_platform">
+    <static>true</static>
+    <link name="platform">
+      <collision name="platform_collision">
+        <pose>0 0 0.15 0 0 0</pose>
+        <geometry><box><size>1.0 1.0 0.30</size></box></geometry>
+      </collision>
+      <visual name="platform_visual">
+        <pose>0 0 0.15 0 0 0</pose>
+        <geometry><box><size>1.0 1.0 0.30</size></box></geometry>
+        <material>
+          <ambient>0.28 0.30 0.32 1</ambient>
+          <diffuse>0.42 0.45 0.48 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

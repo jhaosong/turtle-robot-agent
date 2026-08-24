@@ -1,57 +1,46 @@
-# Fire Extinguisher Simulation Asset
+# YOLOE Prompt Assets
 
-This directory contains a self-contained primitive fire-extinguisher model.
-The demo spawn pose is `x=4.0`, `y=2.5`, `z=0.0`. The named robot observation
-pose `fire_extinguisher_station` is one meter south of it at `x=4.0`, `y=1.5`,
-facing north toward the model.
+This directory contains only the text and visual prompts used by the YOLOE
+detector. The canonical Gazebo world and models live in the ROS package at
+`turtlebot3_behavior_demos/tb3_worlds`; they are not duplicated here.
 
-The repository's `tb3_demo_world.launch.py` automatically spawns this model
-instead of the former random red/green/blue boxes. The commands below are for
-using the same asset in another world or simulator stack.
+The demo runs TurtleBot3 Waffle Pi. Its official Humble Gazebo model places
+the ray sensor at `z=0.121 m` relative to `base_link`, whose fixed joint is at
+`z=0.010 m`, so the simulated scan plane is approximately `0.131 m` above the
+ground. The platform is `0.30 m` high and the extinguisher is spawned with its
+base at `z=0.30 m`. Therefore LiDAR sees the platform as a navigation obstacle,
+while the extinguisher body is above the scan plane and must be localized from
+camera detections.
 
-## Gazebo Classic
+`yoloe_prompts/catalog.json` maps an open-vocabulary label to text descriptions
+and an optional reference image. Relative image paths resolve from that JSON
+file's directory.
 
-From the repository root:
+## Run
 
-```bash
-export GAZEBO_MODEL_PATH="$PWD/sim_assets/models:${GAZEBO_MODEL_PATH:-}"
-ros2 run gazebo_ros spawn_entity.py \
-  -entity fire_extinguisher \
-  -file "$PWD/sim_assets/models/fire_extinguisher/model.sdf" \
-  -x 4.0 -y 2.5 -z 0.0
-```
-
-## New Gazebo / Ignition
+From the repository root in WSL:
 
 ```bash
-export GZ_SIM_RESOURCE_PATH="$PWD/sim_assets/models:${GZ_SIM_RESOURCE_PATH:-}"
-ros2 run ros_gz_sim create \
-  -name fire_extinguisher \
-  -file "$PWD/sim_assets/models/fire_extinguisher/model.sdf" \
-  -x 4.0 -y 2.5 -z 0.0
+docker rm -f rosa-robot-agent-ros 2>/dev/null || true
+./demo_robot_agent_ros_docker.sh
 ```
 
-Alternatively include it in an SDF world:
+Then ask the agent:
 
-```xml
-<include>
-  <uri>model://fire_extinguisher</uri>
-  <pose>4.0 2.5 0.0 0 0 1.5708</pose>
-</include>
+```text
+Navigate to inspection_start, find the fire extinguisher, then inspect it from four viewpoints.
 ```
 
 ## Manual Verification
 
-1. Start the normal TurtleBot demo, or spawn the model manually with the
-   command matching another installed simulator.
-2. Confirm the red extinguisher is standing at `(4.0, 2.5)` in the Gazebo GUI.
-3. Open the `/camera/image_raw` display in RViz, or run
-   `ros2 topic hz /camera/image_raw`, and place the robot at
-   `fire_extinguisher_station`.
-4. Run `search_for_object` with `label="fire extinguisher"` through a route
-   containing `fire_extinguisher_station`.
-5. Tune `ROBOT_AGENT_TARGET_BOX_SIZE_NORMALIZED` if the desired stopping
-   distance differs from the default `0.35` for the actual camera FOV.
+1. Confirm Gazebo shows only the enclosing walls, central platform, robot, and
+   extinguisher.
+2. In RViz, verify `/scan` reports the platform boundary while the camera sees
+   the extinguisher above it.
+3. Run `ros2 topic echo /scan --once` to confirm scan data is active.
+4. Run the inspection request and verify four files appear under the run's
+   `object_views/` directory.
 
-XML well-formedness is unit tested. Visual appearance, detector confidence,
-and stopping distance require this manual simulator check.
+The prompt catalog, canonical world/model XML, and static-map footprint are
+unit tested. Detector confidence and physical visibility still require the
+simulator check above.

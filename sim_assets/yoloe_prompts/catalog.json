@@ -1,0 +1,11 @@
+{
+  "fire extinguisher": {
+    "descriptions": [
+      "fire extinguisher",
+      "red cylindrical fire extinguisher with a black base",
+      "red fire extinguisher cylinder with a black handle and black hose"
+    ],
+    "reference_image": "fire_extinguisher_reference.png",
+    "reference_bbox": [35, 18, 181, 404]
+  }
+}
