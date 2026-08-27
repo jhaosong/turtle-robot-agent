@@ -37,6 +37,23 @@ class FindObjectInput(BaseModel):
     label: str | None = Field(default=None, description="Optional object label, e.g. box")
 
 
+class CaptureObjectCropInput(BaseModel):
+    color: str | None = Field(default=None, description="Optional object colour")
+    label: str | None = Field(default=None, description="Optional open-vocabulary label")
+    padding_ratio: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.5,
+        description="Extra context around each bbox as a fraction of bbox size",
+    )
+
+    @model_validator(mode="after")
+    def require_target(self) -> "CaptureObjectCropInput":
+        if not self.color and not self.label:
+            raise ValueError("capture_object_crop requires a color or label")
+        return self
+
+
 class SearchForObjectInput(BaseModel):
     route: list[str] = Field(
         min_length=1,

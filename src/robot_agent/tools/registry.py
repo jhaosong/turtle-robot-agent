@@ -22,7 +22,7 @@ from robot_agent.navigation import (
     generate_object_viewpoints,
     select_baseline_candidate,
 )
-from robot_agent.perception import Detector, YoloeDetector
+from robot_agent.perception import Detector, YoloeDetector, crop_detection_image
 from robot_agent.perception.bearing_localization import (
     bearing_from_detection,
     triangulate_from_bearings,
@@ -32,6 +32,7 @@ from robot_agent.runtime.runtime import RobotAgentRuntime
 from robot_agent.skills.behavior_tree import BehaviorTreeSkill
 from robot_agent.state import Detection, Pose2D, ToolResult, ToolStatus
 from robot_agent.tools.contracts import (
+    CaptureObjectCropInput,
     CircleObjectForInspectionInput,
     ClarificationInput,
     FindObjectInput,
@@ -654,6 +655,92 @@ class RobotToolRegistry:
             require_image_position=True,
         )
 
+    def _capture_object_crop(
+        self,
+        color: str | None,
+        label: str | None,
+        padding_ratio: float,
+    ) -> ToolResult:
+        image = self.ros.get_camera_frame()
+        if image is None:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={"operation": "capture_object_crop"},
+                error="No camera image is available",
+                retryable=True,
+            )
+
+        matches = self._get_detector().detect(image, color=color, label=label)
+        visible = [
+            item
+            for item in matches
+            if item.confidence >= self.runtime.settings.detection_box_threshold
+        ]
+        self.ros.update_detection_overlay(visible)
+        selected = _select_detection(
+            visible,
+            max_center_jump=self.runtime.settings.detection_tracking_max_center_jump,
+            require_image_position=True,
+        )
+        if selected is None:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={
+                    "operation": "capture_object_crop",
+                    "matches": [item.to_dict() for item in visible],
+                },
+                error="No matching bbox was detected in the current camera frame",
+                retryable=True,
+            )
+
+        crop = crop_detection_image(
+            image,
+            selected,
+            padding_ratio=padding_ratio,
+        )
+        if crop is None:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={
+                    "operation": "capture_object_crop",
+                    "detection": selected.to_dict(),
+                },
+                error="The selected detection has no usable bbox",
+                retryable=True,
+            )
+
+        try:
+            import cv2
+
+            directory = self.runtime.run_path / "object_crops"
+            directory.mkdir(parents=True, exist_ok=True)
+            capture_index = len(list(directory.glob("crop_*.jpg"))) + 1
+            path = directory / f"crop_{capture_index:02d}.jpg"
+            if not cv2.imwrite(str(path), crop.image):
+                raise RuntimeError("OpenCV did not write the crop")
+        except Exception as error:
+            return ToolResult(
+                status=ToolStatus.FAILED,
+                data={
+                    "operation": "capture_object_crop",
+                    "detection": selected.to_dict(),
+                },
+                error=f"Failed to save detection crop: {error}",
+                retryable=True,
+            )
+
+        self.world.update_detections([selected])
+        return ToolResult(
+            status=ToolStatus.SUCCESS,
+            data={
+                "operation": "capture_object_crop",
+                "detection": selected.to_dict(),
+                "image_path": str(path),
+                "crop": crop.metadata(),
+                "padding_ratio": padding_ratio,
+            },
+        )
+
     def _detect_object_bounded(
         self,
         detector: Detector,
@@ -870,17 +957,24 @@ class RobotToolRegistry:
             frame_id=viewpoint.frame_id,
         )
 
-    def _save_inspection_frame(self, index: int) -> str | None:
+    def _save_inspection_frame(
+        self,
+        index: int,
+        detection: Detection,
+    ) -> str | None:
         image = self.ros.get_camera_frame()
         if image is None:
             return None
         try:
             import cv2
 
+            crop = crop_detection_image(image, detection)
+            if crop is None:
+                return None
             directory = self.runtime.run_path / "object_views"
             directory.mkdir(parents=True, exist_ok=True)
-            path = directory / f"view_{index:02d}.jpg"
-            if not cv2.imwrite(str(path), image):
+            path = directory / f"view_{index:02d}_crop.jpg"
+            if not cv2.imwrite(str(path), crop.image):
                 return None
             return str(path)
         except Exception:  # Capturing evidence must not interrupt robot control.
@@ -1306,7 +1400,7 @@ class RobotToolRegistry:
                 "alignment_error": alignment.error,
                 "scan_attempts": scan_attempts,
                 "path_length_m": evaluation.path_length_m,
-                "image_path": self._save_inspection_frame(index),
+                "image_path": self._save_inspection_frame(index, observed),
             }
             captures.append(capture)
             if not _angle_is_covered(planned_angle, covered_angles):
@@ -1413,6 +1507,22 @@ class RobotToolRegistry:
                 )
 
             return self._record("find_object", {"color": color, "label": label}, operation)
+
+        def capture_object_crop(
+            color: str | None = None,
+            label: str | None = None,
+            padding_ratio: float = 0.05,
+        ) -> dict[str, Any]:
+            arguments = {
+                "color": color,
+                "label": label,
+                "padding_ratio": padding_ratio,
+            }
+            return self._record(
+                "capture_object_crop",
+                arguments,
+                lambda: self._capture_object_crop(color, label, padding_ratio),
+            )
 
         def search_for_object(
             route: list[str],
@@ -1539,6 +1649,15 @@ class RobotToolRegistry:
                 ),
             ),
             StructuredTool.from_function(find_object, args_schema=FindObjectInput, description="Query the semantic world model for a visible object."),
+            StructuredTool.from_function(
+                capture_object_crop,
+                args_schema=CaptureObjectCropInput,
+                description=(
+                    "Run perception on the current camera frame and save only the "
+                    "selected object's bbox crop for compact multimodal inspection. "
+                    "This tool does not move the robot."
+                ),
+            ),
             StructuredTool.from_function(
                 search_for_object,
                 args_schema=SearchForObjectInput,
